@@ -24,6 +24,11 @@ export function operatorsFor(p: Property | undefined): Op[] {
       return [{ id: "is", label: "is" }, { id: "before", label: "is before" }, { id: "after", label: "is after" }, { id: "on_or_before", label: "is on or before" }, { id: "on_or_after", label: "is on or after" }, ...empty];
     case "files":
       return empty;
+    case "relation":
+      return [{ id: "contains", label: "contains record" }, { id: "not_contains", label: "does not contain record" }, ...empty];
+    case "formula":
+    case "rollup":
+      return [{ id: "eq", label: "=" }, { id: "gt", label: ">" }, { id: "lt", label: "<" }, { id: "contains", label: "contains" }, { id: "equals", label: "is" }, { id: "is", label: "is (true/false, date)" }, { id: "before", label: "is before" }, { id: "after", label: "is after" }, ...empty];
     default:
       return [{ id: "contains", label: "contains" }, { id: "not_contains", label: "does not contain" }, { id: "equals", label: "is" }, { id: "not_equals", label: "is not" }, { id: "starts_with", label: "starts with" }, { id: "ends_with", label: "ends with" }, ...empty];
   }

@@ -64,8 +64,12 @@ export function usePageActions() {
           onSelect: () => s.createPage({ kind: "page", parentId: p.id }).then(() => opts.onAddChild?.()),
         } as MenuEntry]
       : []),
+    { label: t("Open in split view"), icon: <Icon name="sidebar" />, onSelect: () => s.openSplit(p.id) },
     { label: t("Duplicate"), icon: <Icon name="copy" />, onSelect: () => api.pages.duplicate(p.id).then(s.refreshTree).catch(s.fail) },
     { label: t("Move to…"), icon: <Icon name="folder" />, onSelect: () => window.dispatchEvent(new CustomEvent("pw:move", { detail: p })) },
+    ...(p.kind !== "database" && p.kind !== "canvas"
+      ? [{ label: t("Version history…"), icon: <Icon name="clock" />, onSelect: () => window.dispatchEvent(new CustomEvent("pw:history", { detail: p.id })) } as MenuEntry]
+      : []),
     { label: t("Save as template"), icon: <Icon name="template" />, onSelect: () => api.templates.saveAs(p.id).then(() => { s.refreshTree(); s.toast(t("Saved to Templates"), { kind: "success" }); }).catch(s.fail) },
     { separator: true },
     ...(p.kind !== "canvas"
@@ -74,6 +78,7 @@ export function usePageActions() {
           { label: t("Export PDF…"), icon: <Icon name="print" />, onSelect: () => exportPdf(p) } as MenuEntry,
         ]
       : []),
+    { label: t("Publish as website…"), icon: <Icon name="external" />, onSelect: () => window.dispatchEvent(new CustomEvent("pw:publish", { detail: p.id })) },
     { label: t("Archive"), icon: <Icon name="archive" />, onSelect: () => api.pages.archive(p.id).then(() => { s.refreshTree(); s.toast(t("Archived")); }).catch(s.fail) },
     { label: t("Move to Trash"), icon: <Icon name="trash" />, danger: true, onSelect: () => trash(p) },
   ];

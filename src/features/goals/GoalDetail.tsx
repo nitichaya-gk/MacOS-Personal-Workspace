@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useStore } from "../../app/providers/store";
 import { useI18n } from "../../app/providers/i18n";
-import { errorMessage } from "../../services/desktop-bridge/api";
+import { api, errorMessage } from "../../services/desktop-bridge/api";
 import { growth, money, pct, type GoalDetail as Detail } from "../../services/desktop-bridge/growthApi";
 import type { Goal, Milestone, Skill } from "../../shared/types";
 import { formatDate } from "../../shared/utils";
 import { Icon } from "../../components/ui/Icon";
+import { Gantt, type GanttItem, type GanttScale } from "../../components/ui/Gantt";
 import { EmptyState } from "../../components/ui/Modal";
 import { TaskRow } from "../tasks/TaskRow";
 import { useShield } from "../finance/FinanceView";
 import { Bar, DOMAIN_ICON, DOMAINS, EvidenceDialog, HealthBadge, MetricCard, levelLabel } from "./ui";
 
-type Tab = "overview" | "requirements" | "roadmap" | "tasks" | "skills" | "finance" | "drafts";
+type Tab = "overview" | "requirements" | "roadmap" | "timeline" | "tasks" | "skills" | "finance" | "drafts";
 
 const SAT = ["not_started", "in_progress", "met", "not_met", "blocked", "unknown"] as const;
 const SAT_ICON: Record<string, string> = { not_started: "○", in_progress: "◐", met: "●", not_met: "✕", blocked: "■", unknown: "?" };
@@ -39,6 +40,7 @@ export function GoalDetailView({ id, initialTab }: { id: string; initialTab?: st
     { id: "overview", label: t("Overview") },
     { id: "requirements", label: t("Requirements"), count: d.requirements.length },
     { id: "roadmap", label: t("Roadmap"), count: d.milestones.length },
+    { id: "timeline", label: t("Timeline") },
     { id: "tasks", label: t("Tasks"), count: d.tasks.length },
     { id: "skills", label: t("Skills & evidence"), count: m.skillReadiness.total },
     { id: "finance", label: t("Finance") },
@@ -90,6 +92,7 @@ export function GoalDetailView({ id, initialTab }: { id: string; initialTab?: st
         {tab === "overview" && <Overview d={d} save={save} setTab={setTab} />}
         {tab === "requirements" && <Requirements d={d} reload={load} onEvidence={(rid) => setEvidenceFor({ requirementId: rid })} />}
         {tab === "roadmap" && <Roadmap d={d} reload={load} />}
+        {tab === "timeline" && <GoalTimeline d={d} reload={load} />}
         {tab === "tasks" && (
           <div>
             {d.tasks.length === 0 ? <EmptyState icon="✅" title={t("No tasks linked yet")} hint={t("Add tasks to milestones in the Roadmap tab, or link existing tasks to requirements from the task dialog.")} /> :
@@ -469,6 +472,49 @@ function Drafts({ d, reload }: { d: Detail; reload: () => void }) {
           ))}
         </div>
       ))}
+    </div>
+  );
+}
+
+/** Milestones (diamonds) and tasks on one timeline; drag to change a due date. */
+function GoalTimeline({ d, reload }: { d: Detail; reload: () => void }) {
+  const s = useStore();
+  const { t } = useI18n();
+  const [scale, setScale] = useState<GanttScale>("month");
+  const phaseOf = new Map(d.milestones.map((m) => [m.id, m.phase || t("Roadmap")]));
+  const items: GanttItem[] = [
+    ...(d.goal.targetDate ? [{ id: "goal-target", title: t("Target date"), start: d.goal.targetDate, end: d.goal.targetDate, milestone: true, icon: "🏁", group: t("Goal") }] : []),
+    ...d.milestones.map((m) => ({ id: `m:${m.id}`, title: m.title, start: m.dueDate, end: m.dueDate, milestone: true, done: m.status === "met", icon: m.status === "missed" ? "✕" : "◆", group: phaseOf.get(m.id) })),
+    ...d.tasks.map((x) => ({
+      id: `t:${x.id}`, title: x.title, start: x.dueDate, end: x.dueDate, done: x.status === "done",
+      group: x.milestoneId ? phaseOf.get(x.milestoneId) : t("Other tasks"),
+      dependsOn: x.dependsOn.map((dep) => `t:${dep.id}`),
+    })),
+  ];
+  // Gantt prints a group header whenever the group changes, so keep each phase together.
+  const order = [t("Goal"), ...new Set(d.milestones.map((m) => phaseOf.get(m.id)!)), t("Other tasks")];
+  items.sort((a, b) => order.indexOf(a.group!) - order.indexOf(b.group!) || Number(!a.milestone) - Number(!b.milestone) || (a.start ?? "9").localeCompare(b.start ?? "9"));
+  const change = (id: string, _start: string, end: string) => {
+    if (id === "goal-target") return growth.goals.update(d.goal.id, { targetDate: end }).then(reload).catch(s.fail);
+    const [kind, raw] = id.split(":");
+    (kind === "m" ? growth.goals.updateMilestone(raw, { dueDate: end }) : api.tasks.update(raw, { dueDate: end })).then(reload).catch(s.fail);
+  };
+  return (
+    <div>
+      <div className="row small-text" style={{ marginBottom: 8 }}>
+        <span className="muted" style={{ flex: 1 }}>{t("Drag a milestone or task to change its due date. Arrows show task dependencies.")}</span>
+        <div className="tabs" style={{ margin: 0, border: 0 }}>
+          {(["week", "month", "quarter"] as const).map((k) => <button key={k} className={`tab${scale === k ? " active" : ""}`} onClick={() => setScale(k)}>{t(k[0].toUpperCase() + k.slice(1))}</button>)}
+        </div>
+      </div>
+      <Gantt
+        items={items}
+        today={s.counts?.date ?? new Date().toISOString().slice(0, 10)}
+        scale={scale}
+        onChange={change}
+        onOpen={(id) => id.startsWith("t:") && s.openTask(id.slice(2))}
+        emptyHint={t("Give milestones and tasks a due date to see them here.")}
+      />
     </div>
   );
 }

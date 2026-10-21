@@ -22,7 +22,7 @@ Source of truth: [`src-tauri/migrations/0001_init.sql`](../src-tauri/migrations/
 | `assets` | Attachment metadata; file lives in `assets/<id>` |
 | `mcp_audit_logs` | client, tool, target, result, time (90-day retention) |
 | `search_docs` + `search_fts` | Derived full-text index (rebuildable) |
-| `templates`, `forms`, `automations`, `automation_runs`, `versions` | Reserved for phase 3 |
+| `templates`, `forms`, `automations`, `automation_runs`, `versions` | Templates (phase 1); the others are filled in by schema v3 |
 
 ### Schema v2 — Personal Growth (`0002_growth.sql`)
 
@@ -45,6 +45,37 @@ Source of truth: [`src-tauri/migrations/0001_init.sql`](../src-tauri/migrations/
 | `audit_events` | finance create/update/delete/restore/allocate history |
 
 Migration v1 → v2 only adds tables/columns. Existing pages and tasks are kept as they are; no goals, skills or evidence are inferred (tested in `tests/growth.rs`).
+
+### Schema v3 — phase 3 (`0003_phase3.sql`)
+
+| Table | Purpose |
+| --- | --- |
+| `database_views` (rebuilt) | adds `timeline`, `gallery`, `chart` view types |
+| `forms` | named form per database: which properties, required flags, thank-you text |
+| `automations`, `automation_runs` | trigger + conditions + actions JSON; runs keyed by `idempotency_key` so an event never fires twice |
+| `notification_outbox` | notifications produced by automations, delivered by the app or the background agent |
+| `versions` (+`source`, `title`) | page snapshots: manual, automatic, before an MCP edit, before a restore |
+| `comments` | private per-page comments |
+
+Relation, rollup and formula properties keep their configuration on the property. Relation values are `["<record id>", …]`; rollups and formulas are computed on read and never stored.
+
+### Schema v4 — timetable (`0004_timetable.sql`)
+
+| Table | Purpose |
+| --- | --- |
+| `time_blocks` | title, kind, weekday or one-off date, start/end minutes, repeat range, linked goal/task, reminder offset, per-occurrence exceptions |
+
+### Schema v5 — growth phases B–F (`0005_growth2.sql`)
+
+| Table | Purpose |
+| --- | --- |
+| `learning_courses`, `learning_topics`, `learning_resources` | courses → topics (prerequisites JSON, SM-2 `ease` / `interval_days` / `review_due`, `error_count`) → resources |
+| `focus_sessions` (+`topic_id`) | focus time can count toward a topic |
+| `recurring_transactions` | weekly/monthly/yearly bills and income with `next_date`; month-end dates clamp |
+| `tasks` (+`source_canvas_id`, `source_element_id`) | the canvas object a task was created from |
+| `drafts` (rebuilt) | `kind` is `goal_breakdown` or `transaction` |
+
+Encrypted backups (`.pwbackup`) wrap the normal backup zip as `PWENC1` + salt (16 bytes) + nonce (12 bytes) + AES-256-GCM ciphertext, with the key from PBKDF2-HMAC-SHA256(password, salt, 600,000 rounds).
 
 ## Value formats
 

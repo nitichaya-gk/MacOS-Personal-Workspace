@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useStore } from "../../app/providers/store";
 import { useI18n } from "../../app/providers/i18n";
 import { growth, money } from "../../services/desktop-bridge/growthApi";
-import type { Account, Category, Goal, MonthSummary, SavingsGoal, Transaction } from "../../shared/types";
+import type { Account, Category, CsvImportResult, Goal, MonthSummary, Recurring, SavingsGoal, Transaction } from "../../shared/types";
 import { Icon } from "../../components/ui/Icon";
 import { EmptyState, Modal } from "../../components/ui/Modal";
 import { Bar } from "../goals/ui";
@@ -55,6 +55,10 @@ export function FinanceView() {
   const [adding, setAdding] = useState<null | "income" | "expense" | "transfer">(null);
   const [newAccount, setNewAccount] = useState(false);
   const [newSaving, setNewSaving] = useState(false);
+  const [recurring, setRecurring] = useState<Recurring[]>([]);
+  const [editRecurring, setEditRecurring] = useState<Recurring | "new" | null>(null);
+  const [drafts, setDrafts] = useState<Awaited<ReturnType<typeof growth.finance.drafts>>>([]);
+  const [importing, setImporting] = useState(false);
 
   const load = useCallback(() => {
     growth.finance.accounts().then(setAccounts).catch(s.fail);
@@ -63,6 +67,8 @@ export function FinanceView() {
     growth.finance.transactions({ month }).then(setTxs).catch(s.fail);
     growth.finance.savingsGoals().then(setSavings).catch(s.fail);
     growth.goals.list().then(setGoals).catch(() => {});
+    growth.finance.recurring().then(setRecurring).catch(s.fail);
+    growth.finance.drafts().then(setDrafts).catch(s.fail);
   }, [month, s.fail]);
   useEffect(load, [load]);
 
@@ -93,7 +99,16 @@ export function FinanceView() {
               <button className="btn small primary" onClick={() => setAdding("expense")}>－ {t("Expense")}</button>
               <button className="btn small" onClick={() => setAdding("income")}>＋ {t("Income")}</button>
               <button className="btn small" onClick={() => setAdding("transfer")}>⇄ {t("Transfer")}</button>
+              <button className="btn small ghost" onClick={() => setImporting(true)}><Icon name="upload" size={13} /> {t("Import CSV")}</button>
             </div>
+
+            {drafts.length > 0 && (
+              <div className="card-box" style={{ padding: "10px 14px", borderColor: "var(--accent)" }}>
+                <h3>🤖 {t("Suggested entries waiting for you")} · {drafts.length}</h3>
+                <p className="desc">{t("An AI client proposed these. Nothing is recorded until you pick an account and apply.")}</p>
+                {drafts.map((d) => <DraftRow key={d.id} draft={d} accounts={accounts} hidden={hidden} reload={load} />)}
+              </div>
+            )}
 
             {summary?.currencies.map((c) => (
               <div key={c.currency}>
@@ -168,6 +183,32 @@ export function FinanceView() {
               </div>
             ))}
 
+            <div className="h-section">
+              <span>{t("Recurring bills & income")}</span><span className="spacer" />
+              <button className="btn small ghost" onClick={() => setEditRecurring("new")}>＋ {t("Recurring")}</button>
+            </div>
+            {recurring.length === 0 ? <div className="muted small-text">{t("Rent, subscriptions, salary… add them once; they show up here when due and you confirm each one.")}</div> : (
+              <table className="plain">
+                <tbody>
+                  {recurring.map((r) => (
+                    <tr key={r.id} style={r.active ? undefined : { opacity: 0.5 }}>
+                      <td style={{ width: 110 }} className={r.due ? "" : "muted"}>{r.due ? <span className="chip c-yellow">▲ {t("due")} {r.nextDate}</span> : r.nextDate}</td>
+                      <td><button className="crumb" onClick={() => setEditRecurring(r)}>{r.title}</button> <span className="faint small-text">· {t(r.frequency)} · {r.accountName}{r.categoryName ? ` · ${t(r.categoryName)}` : ""}</span></td>
+                      <td style={{ textAlign: "right", color: r.type === "income" ? "var(--success)" : "var(--danger)" }}>{r.type === "income" ? "+" : "−"}{m(r.amountMinor, r.currency)}</td>
+                      <td style={{ width: 170, textAlign: "right" }}>
+                        {r.active && (
+                          <>
+                            <button className="btn small" onClick={() => growth.finance.settleRecurring(r.id, true).then((x) => (s.toast(t("Recorded · next {date}", { date: x.nextDate })), load())).catch(s.fail)}>{t("Record")}</button>
+                            <button className="btn small ghost" onClick={() => growth.finance.settleRecurring(r.id, false).then(load).catch(s.fail)}>{t("Skip")}</button>
+                          </>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
             <div className="h-section"><span>{t("Accounts")}</span><span className="spacer" /><button className="btn small ghost" onClick={() => setNewAccount(true)}>＋ {t("Account")}</button></div>
             <div className="home-grid">
               {accounts.map((a) => (
@@ -210,6 +251,8 @@ export function FinanceView() {
       </div>
       {adding && <TransactionDialog type={adding} accounts={accounts} categories={categories} goals={goals} onClose={() => setAdding(null)} onSaved={() => (setAdding(null), load())} />}
       {newAccount && <AccountDialog onClose={() => setNewAccount(false)} onSaved={() => (setNewAccount(false), load())} />}
+      {editRecurring && <RecurringDialog item={editRecurring === "new" ? null : editRecurring} accounts={accounts} categories={categories} goals={goals} today={s.counts?.date ?? ""} onClose={() => setEditRecurring(null)} onSaved={() => (setEditRecurring(null), load())} />}
+      {importing && <ImportDialog accounts={accounts} hidden={hidden} onClose={() => setImporting(false)} onDone={() => (setImporting(false), load())} />}
       {newSaving && <SavingsDialog goals={goals} onClose={() => setNewSaving(false)} onSaved={() => (setNewSaving(false), load())} />}
     </div>
   );
@@ -296,6 +339,177 @@ function SavingsDialog({ goals, onClose, onSaved }: { goals: Goal[]; onClose: ()
       <div className="field"><label>{t("For goal (optional)")}</label>
         <select className="select" value={f.goalId} onChange={(e) => setF({ ...f, goalId: e.target.value })}><option value="">—</option>{goals.map((g) => <option key={g.id} value={g.id}>{g.title}</option>)}</select>
       </div>
+    </Modal>
+  );
+}
+
+type TxDraft = Awaited<ReturnType<typeof growth.finance.drafts>>[number];
+
+function DraftRow({ draft, accounts, hidden, reload }: { draft: TxDraft; accounts: Account[]; hidden: boolean; reload: () => void }) {
+  const s = useStore();
+  const { t } = useI18n();
+  const [acc, setAcc] = useState(accounts[0]?.id ?? "");
+  const p = draft.payload;
+  return (
+    <div className="row small-text" style={{ padding: "4px 0", borderTop: "1px solid var(--border)" }}>
+      <span className={`chip ${p.type === "income" ? "c-green" : "c-red"}`}>{t(p.type === "income" ? "Income" : "Expense")}</span>
+      <strong>{hidden ? "••••" : String(p.amount)}</strong>
+      <span style={{ flex: 1 }}>{p.merchantOrSource || "—"}{p.note && <span className="faint"> · {p.note}</span>} <span className="faint">· {p.occurredOn ?? t("today")} · {draft.source.replace(/^mcp:/, "")}</span></span>
+      <select className="select" style={{ width: 150, height: 26 }} value={acc} aria-label={t("Account")} onChange={(e) => setAcc(e.target.value)}>{accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select>
+      <button className="btn small primary" disabled={!acc} onClick={() => growth.finance.resolveDraft(draft.id, acc).then(reload).catch(s.fail)}>{t("Apply")}</button>
+      <button className="btn small ghost" onClick={() => growth.finance.resolveDraft(draft.id, null).then(reload).catch(s.fail)}>{t("Discard")}</button>
+    </div>
+  );
+}
+
+function RecurringDialog({ item, accounts, categories, goals, today, onClose, onSaved }: { item: Recurring | null; accounts: Account[]; categories: Category[]; goals: Goal[]; today: string; onClose: () => void; onSaved: () => void }) {
+  const s = useStore();
+  const { t } = useI18n();
+  const [f, setF] = useState({
+    title: item?.title ?? "", type: item?.type ?? "expense", accountId: item?.accountId ?? accounts[0]?.id ?? "", categoryId: item?.categoryId ?? "",
+    amount: item ? (item.amountMinor / 100).toFixed(2) : "", frequency: item?.frequency ?? "monthly", nextDate: item?.nextDate ?? today, endDate: item?.endDate ?? "",
+    linkedGoalId: item?.linkedGoalId ?? "", active: item?.active ?? true,
+  });
+  const set = <K extends keyof typeof f>(k: K, v: (typeof f)[K]) => setF((x) => ({ ...x, [k]: v }));
+  const cats = categories.filter((c) => c.kind === f.type);
+  const save = () =>
+    growth.finance.saveRecurring(item?.id ?? null, { ...f, categoryId: f.categoryId || cats[0]?.id || null, endDate: f.endDate || null, linkedGoalId: f.linkedGoalId || null }).then(onSaved).catch(s.fail);
+  const remove = async () => {
+    if (item && (await s.confirm({ title: t("Delete this recurring item?"), message: t("Transactions already recorded are kept."), danger: true, confirmLabel: t("Delete") }))) growth.finance.deleteRecurring(item.id).then(onSaved).catch(s.fail);
+  };
+  return (
+    <Modal title={item ? t("Edit recurring item") : t("New recurring item")} onClose={onClose} footer={<>
+      {item && <button className="btn danger" onClick={remove}>{t("Delete")}</button>}
+      <span className="spacer" />
+      <button className="btn" onClick={onClose}>{t("Cancel")}</button>
+      <button className="btn primary" onClick={save}>{t("Save")}</button>
+    </>}>
+      <div className="tabs">
+        {(["expense", "income"] as const).map((k) => <button key={k} className={`tab${f.type === k ? " active" : ""}`} onClick={() => (set("type", k), set("categoryId", ""))}>{t(k === "income" ? "Income" : "Expense")}</button>)}
+      </div>
+      <div className="field"><label>{t("Name")}</label><input className="input" autoFocus value={f.title} placeholder={t("e.g. Rent, Spotify, Salary")} onChange={(e) => set("title", e.target.value)} /></div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+        <div className="field"><label>{t("Amount")}</label><input className="input" inputMode="decimal" value={f.amount} onChange={(e) => set("amount", e.target.value)} /></div>
+        <div className="field"><label>{t("Repeats")}</label><select className="select" value={f.frequency} onChange={(e) => set("frequency", e.target.value as Recurring["frequency"])}>{["weekly", "monthly", "yearly"].map((k) => <option key={k} value={k}>{t(k)}</option>)}</select></div>
+        <div className="field"><label>{t("Account")}</label><select className="select" value={f.accountId} onChange={(e) => set("accountId", e.target.value)}>{accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}</select></div>
+        <div className="field"><label>{t("Category")}</label><select className="select" value={f.categoryId || cats[0]?.id} onChange={(e) => set("categoryId", e.target.value)}>{cats.map((c) => <option key={c.id} value={c.id}>{t(c.name)}</option>)}</select></div>
+        <div className="field"><label>{t("Next due")}</label><input className="input" type="date" value={f.nextDate} onChange={(e) => set("nextDate", e.target.value)} /></div>
+        <div className="field"><label>{t("Ends (optional)")}</label><input className="input" type="date" value={f.endDate} onChange={(e) => set("endDate", e.target.value)} /></div>
+      </div>
+      <div className="field"><label>{t("For goal (optional)")}</label>
+        <select className="select" value={f.linkedGoalId} onChange={(e) => set("linkedGoalId", e.target.value)}><option value="">—</option>{goals.map((g) => <option key={g.id} value={g.id}>{g.title}</option>)}</select>
+      </div>
+      {item && <label className="row small-text"><input type="checkbox" checked={f.active} onChange={(e) => set("active", e.target.checked)} /> {t("Active")}</label>}
+    </Modal>
+  );
+}
+
+/** First CSV line → column names (handles quoted cells). */
+function csvHeader(text: string): string[] {
+  const line = text.replace(/^\uFEFF/, "").split(/\r?\n/)[0] ?? "";
+  const out: string[] = [];
+  let cur = "";
+  let q = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (q) {
+      if (ch === '"' && line[i + 1] === '"') (cur += '"'), i++;
+      else if (ch === '"') q = false;
+      else cur += ch;
+    } else if (ch === '"') q = true;
+    else if (ch === ",") (out.push(cur.trim()), (cur = ""));
+    else cur += ch;
+  }
+  out.push(cur.trim());
+  return out.filter(Boolean);
+}
+
+const GUESS: Record<string, RegExp> = {
+  date: /date|วันที่|วัน/i,
+  amount: /amount|จำนวน|ยอด|เงิน/i,
+  description: /desc|detail|memo|รายการ|รายละเอียด|ผู้รับ/i,
+  category: /categ|หมวด/i,
+};
+
+function ImportDialog({ accounts, hidden, onClose, onDone }: { accounts: Account[]; hidden: boolean; onClose: () => void; onDone: () => void }) {
+  const s = useStore();
+  const { t, locale } = useI18n();
+  const [csv, setCsv] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [accountId, setAccountId] = useState(accounts[0]?.id ?? "");
+  const [cols, setCols] = useState<string[]>([]);
+  const [map, setMap] = useState<Record<string, string>>({});
+  const [preview, setPreview] = useState<CsvImportResult | null>(null);
+  const pick = async (file: File | undefined) => {
+    if (!file) return;
+    const text = await file.text();
+    const header = csvHeader(text);
+    setCsv(text);
+    setFileName(file.name);
+    setCols(header);
+    setPreview(null);
+    const guess: Record<string, string> = {};
+    for (const [k, re] of Object.entries(GUESS)) {
+      const hit = header.find((h) => re.test(h) && !Object.values(guess).includes(h));
+      if (hit) guess[k] = hit;
+    }
+    setMap(guess);
+  };
+  const run = (dryRun: boolean) =>
+    growth.finance.importCsv(accountId, csv, map, dryRun).then((r) => {
+      if (dryRun) setPreview(r);
+      else (s.toast(t("Imported {n} transactions", { n: r.toAdd })), onDone());
+    }).catch(s.fail);
+  const cur = accounts.find((a) => a.id === accountId)?.currency ?? "THB";
+  return (
+    <Modal wide title={t("Import transactions from CSV")} onClose={onClose} footer={<>
+      <span className="small-text muted" style={{ flex: 1 }}>{t("Negative amounts are expenses, positive are income. Rows already recorded (same date, amount and description) are skipped.")}</span>
+      <button className="btn" onClick={onClose}>{t("Cancel")}</button>
+      {preview ? <button className="btn primary" disabled={!preview.toAdd} onClick={() => run(false)}>{t("Import {n}", { n: preview.toAdd })}</button>
+        : <button className="btn primary" disabled={!csv || !map.date || !map.amount} onClick={() => run(true)}>{t("Preview")}</button>}
+    </>}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 12px" }}>
+        <div className="field"><label>{t("File")}</label>
+          <label className="btn" style={{ justifyContent: "flex-start" }}><Icon name="upload" size={13} /> {fileName || t("Choose a .csv file…")}<input type="file" accept=".csv,text/csv" hidden onChange={(e) => pick(e.target.files?.[0])} /></label>
+        </div>
+        <div className="field"><label>{t("Into account")}</label><select className="select" value={accountId} onChange={(e) => (setAccountId(e.target.value), setPreview(null))}>{accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}</select></div>
+      </div>
+      {cols.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "0 12px" }}>
+          {(["date", "amount", "description", "category"] as const).map((k) => (
+            <div key={k} className="field"><label>{t(k === "date" ? "Date column" : k === "amount" ? "Amount column" : k === "description" ? "Description column" : "Category column")}{(k === "date" || k === "amount") && " *"}</label>
+              <select className="select" value={map[k] ?? ""} onChange={(e) => (setMap({ ...map, [k]: e.target.value }), setPreview(null))}>
+                <option value="">—</option>{cols.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            </div>
+          ))}
+        </div>
+      )}
+      {preview && (
+        <>
+          <div className="row small-text" style={{ margin: "4px 0 8px", gap: 16 }}>
+            <span>✅ <strong>{preview.toAdd}</strong> {t("to add")}</span>
+            <span className="muted">↺ {preview.duplicates} {t("already recorded")}</span>
+            {preview.errors.length > 0 && <span style={{ color: "var(--danger)" }}>⚠︎ {preview.errors.length} {t("unreadable rows")}</span>}
+          </div>
+          {preview.errors.length > 0 && <div className="small-text faint" style={{ marginBottom: 8 }}>{preview.errors.slice(0, 5).join(" · ")}</div>}
+          {preview.preview.length > 0 && (
+            <table className="plain">
+              <thead><tr><th>{t("Date")}</th><th>{t("Description")}</th><th style={{ textAlign: "right" }}>{t("Amount")}</th></tr></thead>
+              <tbody>
+                {preview.preview.map((r, i) => (
+                  <tr key={i}>
+                    <td className="muted">{r.date}</td>
+                    <td>{r.description || "—"}</td>
+                    <td style={{ textAlign: "right", color: r.type === "income" ? "var(--success)" : "var(--danger)" }}>{r.type === "income" ? "+" : "−"}{money(r.amountMinor, cur, locale, hidden)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {preview.toAdd > preview.preview.length && <div className="small-text faint">{t("…and {n} more", { n: preview.toAdd - preview.preview.length })}</div>}
+        </>
+      )}
     </Modal>
   );
 }

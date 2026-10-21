@@ -17,11 +17,14 @@ pub const PROPERTY_TYPES: &[&str] = &[
     "files",
     "created_time",
     "last_edited_time",
+    "relation",
+    "formula",
+    "rollup",
 ];
 
 /// Types whose values are computed and never stored in record_values.
 pub fn is_computed(t: &str) -> bool {
-    matches!(t, "title" | "created_time" | "last_edited_time")
+    matches!(t, "title" | "created_time" | "last_edited_time" | "formula" | "rollup")
 }
 
 pub fn options(config: &Value) -> Vec<Value> {
@@ -107,6 +110,21 @@ pub fn validate_value(ptype: &str, config: &Value, value: &Value) -> Result<Opti
             Some(false) => return Ok(None),
             None => return invalid("expected true or false"),
         },
+        "relation" => match value.as_array() {
+            Some(ids) if ids.iter().all(|i| i.as_str().is_some_and(crate::domain::is_uuid)) => {
+                if ids.is_empty() {
+                    return Ok(None);
+                }
+                let mut uniq: Vec<Value> = vec![];
+                for i in ids {
+                    if !uniq.contains(i) {
+                        uniq.push(i.clone());
+                    }
+                }
+                Value::Array(uniq)
+            }
+            _ => return invalid("expected a list of record ids"),
+        },
         "files" => match value.as_array() {
             Some(files) if files.iter().all(|f| f.get("assetId").and_then(|a| a.as_str()).is_some()) => {
                 if files.is_empty() {
@@ -123,7 +141,19 @@ pub fn validate_value(ptype: &str, config: &Value, value: &Value) -> Result<Opti
 
 /// Human-readable text of a value (CSV export, search, conversion to text).
 pub fn display_value(ptype: &str, config: &Value, value: &Value) -> String {
+    if let Some(err) = value.get("error").and_then(|e| e.as_str()) {
+        return format!("#ERROR: {err}");
+    }
     match ptype {
+        "formula" | "rollup" => match value {
+            Value::Object(o) if o.contains_key("start") => o["start"].as_str().unwrap_or("").to_string(),
+            Value::Array(a) => a.iter().map(|x| display_value("formula", config, x)).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", "),
+            Value::Number(_) => display_value("number", config, value),
+            Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+            Value::String(s) => s.clone(),
+            _ => String::new(),
+        },
+        "relation" => value.as_array().map(|a| a.len().to_string() + " linked").unwrap_or_default(),
         "select" | "status" => value.as_str().and_then(|id| option_name(config, id)).unwrap_or_default(),
         "multi_select" => value
             .as_array()

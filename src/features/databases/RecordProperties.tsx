@@ -14,7 +14,7 @@ export function RecordProperties({ recordId }: { recordId: string }) {
   useEffect(() => {
     load();
   }, [load]);
-  const menu = usePropertyMenu(load);
+  const menu = usePropertyMenu(ctx?.database ?? null, load);
   if (!ctx) return null;
   const { database: db, record } = ctx;
   return (

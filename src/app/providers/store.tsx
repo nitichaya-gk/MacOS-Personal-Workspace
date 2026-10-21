@@ -57,6 +57,9 @@ interface Store {
   toggleInspector: () => void;
   paletteOpen: boolean;
   setPaletteOpen: (o: boolean) => void;
+  /** Page shown in the right-hand split pane, if any. */
+  splitPageId: string | null;
+  openSplit: (id: string | null) => void;
   taskDialog: { id?: string; defaults?: Record<string, unknown> } | null;
   openTask: (id?: string, defaults?: Record<string, unknown>) => void;
   closeTask: () => void;
@@ -70,6 +73,7 @@ function routeFromHash(): Route {
   const [name, arg, extra] = location.hash.replace(/^#\/?/, "").split("/");
   switch (name) {
     case "page":
+      return arg ? { name, id: arg, tab: extra } : { name: "home" };
     case "section":
       return arg ? { name, id: arg } : { name: "home" };
     case "tasks":
@@ -83,7 +87,12 @@ function routeFromHash(): Route {
     case "templates":
     case "habits":
     case "finance":
+    case "automations":
+    case "timetable":
+    case "learning":
       return { name };
+    case "form":
+      return arg ? { name, id: arg } : { name: "home" };
     case "goals":
       return { name, domain: arg };
     case "goal":
@@ -118,6 +127,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }
   });
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [splitPageId, openSplit] = useState<string | null>(null);
   const [taskDialog, setTaskDialog] = useState<Store["taskDialog"]>(null);
   const toastId = useRef(0);
 
@@ -242,6 +252,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         return !o;
       }),
     paletteOpen,
+    splitPageId,
+    openSplit,
     setPaletteOpen,
     taskDialog,
     openTask: (id, defaults) => setTaskDialog({ id, defaults }),

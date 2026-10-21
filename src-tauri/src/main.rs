@@ -7,5 +7,9 @@ fn main() {
         personal_workspace_lib::integrations::mcp::run_stdio();
         return;
     }
+    if std::env::args().any(|a| a == "--agent") {
+        personal_workspace_lib::integrations::agent::run();
+        return;
+    }
     personal_workspace_lib::run();
 }

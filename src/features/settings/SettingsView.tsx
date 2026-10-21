@@ -3,10 +3,11 @@ import { open as openDialog, save } from "@tauri-apps/plugin-dialog";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import { useStore } from "../../app/providers/store";
 import { useI18n } from "../../app/providers/i18n";
-import { api } from "../../services/desktop-bridge/api";
+import { api, rpc } from "../../services/desktop-bridge/api";
 import type { BackupInfo, Settings } from "../../shared/types";
 import { formatBytes, formatDateTime } from "../../shared/utils";
 import { kindIcon } from "../../components/ui/Icon";
+import { Modal } from "../../components/ui/Modal";
 
 type Tab = "general" | "workspace" | "backup" | "mcp";
 
@@ -94,6 +95,7 @@ function General() {
           <button className="btn small" onClick={async () => setPerm((await requestPermission()) === "granted")}>{t("Ask for permission")}</button>
           <button className="btn small" onClick={() => sendNotification({ title: "Personal Workspace", body: t("Notifications are working.") })}>{t("Send test notification")}</button>
         </div>
+        <AgentToggle />
         <label className="row" style={{ marginTop: 14 }}>
           <input type="checkbox" checked={st.dailySummary.enabled} onChange={(e) => set("dailySummary", { ...st.dailySummary, enabled: e.target.checked })} />
           {t("Daily summary of today's tasks at")}
@@ -109,6 +111,25 @@ function General() {
         </div>
       </section>
     </>
+  );
+}
+
+/** Background agent: a per-user LaunchAgent that keeps reminders running while the app is closed. */
+function AgentToggle() {
+  const s = useStore();
+  const { t } = useI18n();
+  const [on, setOn] = useState<boolean | null>(null);
+  useEffect(() => {
+    rpc<{ enabled: boolean }>("agent.status").then((r) => setOn(r.enabled)).catch(() => setOn(null));
+  }, []);
+  return (
+    <div style={{ marginTop: 14 }}>
+      <label className="row">
+        <input type="checkbox" checked={!!on} disabled={on === null} onChange={(e) => rpc<{ enabled: boolean }>("agent.set", { enabled: e.target.checked }).then((r) => (setOn(r.enabled), s.toast(r.enabled ? t("Background reminders are on") : t("Background reminders are off")))).catch(s.fail)} />
+        <strong>{t("Keep reminders running when the app is closed")}</strong>
+      </label>
+      <p className="small-text muted" style={{ margin: "4px 0 0 24px" }}>{t("Installs a small background helper (a macOS Login Item / LaunchAgent) that checks reminders, the daily summary, habit and timetable reminders and scheduled automations every 30 seconds. It never sends data anywhere. Turn off to remove it.")}</p>
+    </div>
   );
 }
 
@@ -189,6 +210,8 @@ function BackupTab() {
   const st = s.settings!;
   const [list, setList] = useState<BackupInfo[]>([]);
   const [busy, setBusy] = useState(false);
+  const [askPassword, setAskPassword] = useState<{ confirm: boolean; resolve: (p: string | null) => void } | null>(null);
+  const password = (confirm: boolean) => new Promise<string | null>((resolve) => setAskPassword({ confirm, resolve }));
   const load = () => api.backup.list().then(setList).catch(s.fail);
   useEffect(() => {
     load();
@@ -196,12 +219,16 @@ function BackupTab() {
   }, []);
 
   const restore = async (source: string) => {
+    const encrypted = /\.pwbackup$/i.test(source) || (await api.backup.isEncrypted(source).then((x) => x.encrypted).catch(() => false));
+    const pass = encrypted ? await password(false) : "";
+    if (pass === null) return;
     const parent = await openDialog({ directory: true, title: t("Choose where to put the restored copy") });
     if (typeof parent !== "string") return;
     const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
     setBusy(true);
     try {
-      const r = await api.backup.restore(source, `${parent}/Restored workspace ${stamp}`);
+      const dest = `${parent}/Restored workspace ${stamp}`;
+      const r = encrypted ? await api.backup.restoreEncrypted(source, dest, pass) : await api.backup.restore(source, dest);
       const ok = r.integrity.ok;
       if (await s.confirm({
         title: ok ? t("Backup restored") : t("Backup restored with warnings"),
@@ -261,13 +288,44 @@ function BackupTab() {
             setBusy(false);
           }}>{t("Export workspace (.zip)…")}</button>
           <button className="btn" disabled={busy} onClick={async () => {
-            const f = await openDialog({ multiple: false, filters: [{ name: "Workspace backup", extensions: ["zip"] }] });
+            const pass = await password(true);
+            if (!pass) return;
+            const dest = await save({ defaultPath: `${s.info?.name ?? "Workspace"} ${new Date().toISOString().slice(0, 10)}.pwbackup`, filters: [{ name: "Encrypted backup", extensions: ["pwbackup"] }] });
+            if (!dest) return;
+            setBusy(true);
+            await api.backup.exportEncrypted(dest, pass).then((r) => s.toast(t("Encrypted backup saved ({size})", { size: formatBytes(r.sizeBytes) }), { kind: "success" })).catch(s.fail);
+            setBusy(false);
+          }}>🔒 {t("Export encrypted backup…")}</button>
+          <button className="btn" onClick={() => window.dispatchEvent(new CustomEvent("pw:publish"))}>🌐 {t("Publish as a static website…")}</button>
+          <button className="btn" disabled={busy} onClick={async () => {
+            const f = await openDialog({ multiple: false, filters: [{ name: "Workspace backup", extensions: ["zip", "pwbackup"] }] });
             if (typeof f === "string") restore(f);
-          }}>{t("Restore from .zip…")}</button>
+          }}>{t("Restore from file…")}</button>
         </div>
+        <p className="small-text faint" style={{ marginTop: 10 }}>{t("Encrypted backups (.pwbackup) use AES-256 with a key derived from your password. Without the password the backup cannot be opened — there is no recovery.")}</p>
+        {askPassword && <PasswordDialog confirm={askPassword.confirm} onDone={(p) => (askPassword.resolve(p), setAskPassword(null))} />}
         <p className="small-text faint" style={{ marginTop: 10 }}>{t("Pages export to Markdown/PDF from their ⋯ menu, databases to CSV/JSON from the database menu, and canvases to PNG/SVG/JSON from the canvas sidebar.")}</p>
       </section>
     </>
+  );
+}
+
+function PasswordDialog({ confirm, onDone }: { confirm: boolean; onDone: (password: string | null) => void }) {
+  const { t } = useI18n();
+  const [a, setA] = useState("");
+  const [b, setB] = useState("");
+  const problem = a.length < 8 ? t("At least 8 characters") : confirm && a !== b ? t("Passwords do not match") : null;
+  const submit = () => !problem && onDone(a);
+  return (
+    <Modal title={confirm ? t("Choose a backup password") : t("Backup password")} onClose={() => onDone(null)} footer={<>
+      <button className="btn" onClick={() => onDone(null)}>{t("Cancel")}</button>
+      <button className="btn primary" disabled={!!problem} onClick={submit}>{confirm ? t("Encrypt") : t("Unlock")}</button>
+    </>}>
+      <div className="field"><label>{t("Password")}</label><input className="input" type="password" autoFocus autoComplete="new-password" value={a} onChange={(e) => setA(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !confirm && submit()} /></div>
+      {confirm && <div className="field"><label>{t("Repeat password")}</label><input className="input" type="password" autoComplete="new-password" value={b} onChange={(e) => setB(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} /></div>}
+      {a && problem && <div className="small-text" style={{ color: "var(--danger)" }}>{problem}</div>}
+      {confirm && <p className="small-text muted">{t("Store this password somewhere safe. If you forget it, the backup cannot be restored.")}</p>}
+    </Modal>
   );
 }
 
@@ -280,6 +338,7 @@ function McpTab() {
   useEffect(() => {
     api.mcp.status().then(setStatus).catch(s.fail);
   }, [s.fail, mcp]);
+  const toggleWrite = (id: string) => set("mcp", { ...mcp, writeIds: (mcp.writeIds ?? []).includes(id) ? (mcp.writeIds ?? []).filter((x) => x !== id) : [...(mcp.writeIds ?? []), id] });
   const toggle = (id: string) => set("mcp", { ...mcp, allowedIds: mcp.allowedIds.includes(id) ? mcp.allowedIds.filter((x) => x !== id) : [...mcp.allowedIds, id] });
   const shareable = s.tree.filter((p) => !p.parentId && (p.kind === "project" || p.kind === "database" || p.kind === "page"));
   const copy = (text: string) => navigator.clipboard.writeText(text).then(() => s.toast(t("Copied")));
@@ -308,6 +367,7 @@ function McpTab() {
             <label className="menu-item"><input type="checkbox" checked={mcp.allowedIds.includes("domain:goals")} onChange={() => toggle("domain:goals")} /> 🎯 {t("Goals & roadmaps")}</label>
             <label className="menu-item"><input type="checkbox" checked={mcp.allowedIds.includes("domain:skills")} onChange={() => toggle("domain:skills")} /> 🧠 {t("Skills & evidence")}</label>
             <label className="menu-item"><input type="checkbox" checked={mcp.allowedIds.includes("domain:habits")} onChange={() => toggle("domain:habits")} /> 🔁 {t("Habits")}</label>
+            <label className="menu-item"><input type="checkbox" checked={mcp.allowedIds.includes("domain:timetable")} onChange={() => toggle("domain:timetable")} /> 📅 {t("Timetable")}</label>
             <div className="menu-label">{t("Individual pages, projects and databases")}</div>
             {shareable.map((p) => (
               <label key={p.id} className="menu-item"><input type="checkbox" checked={mcp.allowedIds.includes(p.id)} onChange={() => toggle(p.id)} /> {p.icon || kindIcon(p.kind)} {p.title || t("Untitled")}</label>
@@ -315,6 +375,24 @@ function McpTab() {
           </div>
         )}
       </section>
+      {mcp.enabled && (
+        <section className="card-box">
+          <h3>✏️ {t("Allow changes (write access)")}</h3>
+          <p className="desc">{t("Off by default. Clients can only change what you tick here (it must also be readable). Page edits save a version first, every change is logged, and there are no delete tools.")}</p>
+          <div style={{ maxHeight: 240, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 8, padding: 6 }}>
+            {s.sections.filter((x) => x.kind !== "templates").map((x) => (
+              <label key={x.id} className="menu-item"><input type="checkbox" checked={(mcp.writeIds ?? []).includes(x.id)} onChange={() => toggleWrite(x.id)} /> {x.icon} {x.name}</label>
+            ))}
+            <label className="menu-item"><input type="checkbox" checked={(mcp.writeIds ?? []).includes("tasks:unassigned")} onChange={() => toggleWrite("tasks:unassigned")} /> ✅ {t("Tasks without a project")}</label>
+            <label className="menu-item"><input type="checkbox" checked={(mcp.writeIds ?? []).includes("domain:goals")} onChange={() => toggleWrite("domain:goals")} /> 🎯 {t("Focus sessions")}</label>
+            <label className="menu-item"><input type="checkbox" checked={(mcp.writeIds ?? []).includes("domain:habits")} onChange={() => toggleWrite("domain:habits")} /> 🔁 {t("Habit check-ins")}</label>
+            <label className="menu-item"><input type="checkbox" checked={(mcp.writeIds ?? []).includes("domain:skills")} onChange={() => toggleWrite("domain:skills")} /> 🧠 {t("Skill evidence")}</label>
+            {shareable.map((p) => (
+              <label key={p.id} className="menu-item"><input type="checkbox" checked={(mcp.writeIds ?? []).includes(p.id)} onChange={() => toggleWrite(p.id)} /> {p.icon || kindIcon(p.kind)} {p.title || t("Untitled")}</label>
+            ))}
+          </div>
+        </section>
+      )}
       {mcp.enabled && (
         <section className="card-box" style={{ borderColor: mcp.allowedIds.includes("domain:finance") ? "var(--danger)" : undefined }}>
           <h3>💰 {t("Finance data (sensitive)")}</h3>

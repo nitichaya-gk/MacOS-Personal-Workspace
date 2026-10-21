@@ -401,3 +401,225 @@ pub fn audit_trail(conn: &Connection, limit: usize) -> Result<Vec<Value>> {
         .collect::<std::result::Result<_, _>>()?;
     Ok(rows)
 }
+
+// ---------- recurring bills / income ----------
+
+fn advance(date: &str, freq: &str) -> Result<String> {
+    let d = crate::domain::growth::date(date).ok_or_else(|| AppError::Invalid("bad date".into()))?;
+    use chrono::Datelike;
+    let next = match freq {
+        "weekly" => d + chrono::Duration::days(7),
+        "yearly" => d.with_year(d.year() + 1).unwrap_or(d + chrono::Duration::days(365)),
+        _ => {
+            let (y, m) = if d.month() == 12 { (d.year() + 1, 1) } else { (d.year(), d.month() + 1) };
+            let mut day = d.day();
+            loop {
+                if let Some(x) = chrono::NaiveDate::from_ymd_opt(y, m, day) {
+                    break x;
+                }
+                day -= 1;
+            }
+        }
+    };
+    Ok(next.to_string())
+}
+
+pub fn recurring(conn: &Connection) -> Result<Vec<Value>> {
+    let today = tasks::today(conn);
+    let rows = conn
+        .prepare(
+            "SELECT r.id, r.title, r.type, r.account_id, a.name, r.category_id, c.name, r.amount_minor, a.currency, r.frequency, r.next_date, r.end_date, r.linked_goal_id, r.active
+             FROM recurring_transactions r JOIN financial_accounts a ON a.id=r.account_id LEFT JOIN financial_categories c ON c.id=r.category_id ORDER BY r.next_date",
+        )?
+        .query_map([], |r| {
+            let next: String = r.get(10)?;
+            Ok(json!({ "id": r.get::<_, String>(0)?, "title": r.get::<_, String>(1)?, "type": r.get::<_, String>(2)?, "accountId": r.get::<_, String>(3)?,
+                       "accountName": r.get::<_, String>(4)?, "categoryId": r.get::<_, Option<String>>(5)?, "categoryName": r.get::<_, Option<String>>(6)?,
+                       "amountMinor": r.get::<_, i64>(7)?, "currency": r.get::<_, String>(8)?, "frequency": r.get::<_, String>(9)?, "nextDate": next,
+                       "endDate": r.get::<_, Option<String>>(11)?, "linkedGoalId": r.get::<_, Option<String>>(12)?, "active": r.get::<_, i64>(13)? != 0,
+                       "due": next.as_str() <= today.as_str() }))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(rows)
+}
+
+pub fn save_recurring(conn: &Connection, id: Option<&str>, p: &Value) -> Result<Value> {
+    let ttype = p.get("type").and_then(|v| v.as_str()).unwrap_or("expense");
+    if !matches!(ttype, "income" | "expense") {
+        return invalid("type must be income or expense");
+    }
+    let freq = p.get("frequency").and_then(|v| v.as_str()).unwrap_or("monthly");
+    if !matches!(freq, "weekly" | "monthly" | "yearly") {
+        return invalid("frequency must be weekly, monthly or yearly");
+    }
+    let title = p.get("title").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    if title.is_empty() {
+        return invalid("give the bill a name");
+    }
+    let amt = amount(p, "amount")?;
+    if amt <= 0 {
+        return invalid("amount must be greater than 0");
+    }
+    let next = p.get("nextDate").and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| tasks::today(conn));
+    if crate::domain::growth::date(&next).is_none() {
+        return invalid("date must be YYYY-MM-DD");
+    }
+    let acc = p.get("accountId").and_then(|v| v.as_str()).ok_or_else(|| AppError::Invalid("choose an account".into()))?;
+    account_currency(conn, acc)?;
+    let s = |k: &str| p.get(k).and_then(|v| v.as_str()).filter(|v| !v.is_empty()).map(String::from);
+    let id = id.map(String::from).unwrap_or_else(new_id);
+    conn.execute(
+        "INSERT INTO recurring_transactions(id, title, type, account_id, category_id, amount_minor, frequency, next_date, end_date, linked_goal_id, active, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
+         ON CONFLICT(id) DO UPDATE SET title=excluded.title, type=excluded.type, account_id=excluded.account_id, category_id=excluded.category_id,
+           amount_minor=excluded.amount_minor, frequency=excluded.frequency, next_date=excluded.next_date, end_date=excluded.end_date,
+           linked_goal_id=excluded.linked_goal_id, active=excluded.active",
+        params![id, title, ttype, acc, s("categoryId"), amt, freq, next, s("endDate"), s("linkedGoalId"), p.get("active").and_then(|v| v.as_bool()).unwrap_or(true) as i64, now()],
+    )?;
+    audit(conn, "recurring", &id, "save", None, Some(p))?;
+    recurring(conn)?.into_iter().find(|r| r["id"] == id.as_str()).ok_or_else(|| AppError::NotFound("recurring".into()))
+}
+
+pub fn delete_recurring(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("DELETE FROM recurring_transactions WHERE id=?1", [id])?;
+    audit(conn, "recurring", id, "delete", None, None)
+}
+
+/// Records the due occurrence as a real transaction (post=true) or skips it, then moves to the next date.
+pub fn settle_recurring(conn: &Connection, id: &str, post: bool) -> Result<Value> {
+    let r = recurring(conn)?.into_iter().find(|r| r["id"] == id).ok_or_else(|| AppError::NotFound("recurring".into()))?;
+    let tx = crate::infrastructure::database::begin(conn)?;
+    if post {
+        add_transaction(&tx, &json!({
+            "type": r["type"], "accountId": r["accountId"], "amount": r["amountMinor"], "categoryId": r["categoryId"],
+            "occurredOn": r["nextDate"], "merchantOrSource": r["title"], "linkedGoalId": r["linkedGoalId"], "note": "recurring",
+        }))?;
+    }
+    let next = advance(r["nextDate"].as_str().unwrap_or(""), r["frequency"].as_str().unwrap_or("monthly"))?;
+    let ended = r["endDate"].as_str().is_some_and(|e| next.as_str() > e);
+    tx.execute("UPDATE recurring_transactions SET next_date=?2, active=?3 WHERE id=?1", params![id, next, (!ended) as i64])?;
+    tx.commit()?;
+    Ok(json!({ "posted": post, "nextDate": next, "ended": ended }))
+}
+
+// ---------- CSV import ----------
+
+/// Imports bank-statement style CSV into one account. `mapping` names the columns (date, amount, description,
+/// optional category). Negative amounts are expenses, positive are income. Rows already present
+/// (same date, amount and description) are skipped, so importing the same file twice adds nothing.
+pub fn import_csv(conn: &Connection, account_id: &str, csv: &str, mapping: &Value, dry_run: bool) -> Result<Value> {
+    let cur = account_currency(conn, account_id)?;
+    let rows = crate::infrastructure::export::parse_csv(csv.trim_start_matches('\u{feff}'));
+    let Some(header) = rows.first() else { return invalid("the CSV file is empty") };
+    let col = |k: &str| -> Option<usize> {
+        let name = mapping.get(k).and_then(|v| v.as_str())?;
+        header.iter().position(|h| h.trim() == name)
+    };
+    let (Some(dc), Some(ac)) = (col("date"), col("amount")) else { return invalid("choose the date and amount columns") };
+    let desc_c = col("description");
+    let cat_c = col("category");
+    let cats = categories(conn)?;
+    let parse_date = |s: &str| -> Option<String> {
+        let s = s.trim();
+        for f in ["%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%m/%d/%Y", "%Y/%m/%d"] {
+            if let Ok(d) = chrono::NaiveDate::parse_from_str(s, f) {
+                // Thai Buddhist-era years (e.g. 2569) → Common Era.
+                use chrono::Datelike;
+                let d = if d.year() > 2400 { d.with_year(d.year() - 543).unwrap_or(d) } else { d };
+                return Some(d.to_string());
+            }
+        }
+        None
+    };
+    let mut preview = vec![];
+    let (mut added, mut dupes, mut errors) = (0, 0, vec![]);
+    let tx = crate::infrastructure::database::begin(conn)?;
+    for (i, r) in rows.iter().enumerate().skip(1) {
+        let line = i + 1;
+        let Some(date) = r.get(dc).and_then(|s| parse_date(s)) else {
+            errors.push(format!("line {line}: unreadable date"));
+            continue;
+        };
+        let raw = r.get(ac).map(|s| s.replace(['(', ')'], "")).unwrap_or_default();
+        let negative_paren = r.get(ac).is_some_and(|s| s.trim().starts_with('('));
+        let Some(mut minor) = crate::domain::growth::parse_money(&raw) else {
+            errors.push(format!("line {line}: unreadable amount “{raw}”"));
+            continue;
+        };
+        if negative_paren {
+            minor = -minor.abs();
+        }
+        if minor == 0 {
+            continue;
+        }
+        let desc = desc_c.and_then(|c| r.get(c)).map(|s| s.trim().to_string()).unwrap_or_default();
+        let ttype = if minor < 0 { "expense" } else { "income" };
+        let cat = cat_c.and_then(|c| r.get(c)).and_then(|name| cats.iter().find(|x| x["name"].as_str() == Some(name.trim()) && x["kind"] == ttype)).and_then(|x| x["id"].as_str().map(String::from));
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM transactions WHERE deleted_at IS NULL AND account_id=?1 AND occurred_on=?2 AND amount_minor=?3 AND type=?4 AND merchant_or_source=?5)",
+            params![account_id, date, minor.abs(), ttype, desc],
+            |r| r.get(0),
+        )?;
+        if exists {
+            dupes += 1;
+            continue;
+        }
+        if preview.len() < 20 {
+            preview.push(json!({ "date": date, "type": ttype, "amountMinor": minor.abs(), "description": desc, "currency": cur }));
+        }
+        if !dry_run {
+            add_transaction(&tx, &json!({ "type": ttype, "accountId": account_id, "amount": minor.abs(), "occurredOn": date, "merchantOrSource": desc, "categoryId": cat, "note": "imported" }))?;
+        }
+        added += 1;
+    }
+    if dry_run {
+        drop(tx); // nothing written
+    } else {
+        tx.commit()?;
+    }
+    Ok(json!({ "dryRun": dry_run, "rows": rows.len().saturating_sub(1), "toAdd": added, "duplicates": dupes, "errors": errors, "preview": preview, "columns": header }))
+}
+
+/// A transaction proposed by an AI client: stored as a draft until the user applies it.
+pub fn draft_transaction(conn: &Connection, p: &Value, source: &str) -> Result<Value> {
+    let ttype = p.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if !matches!(ttype, "income" | "expense") {
+        return invalid("type must be income or expense");
+    }
+    amount(p, "amount")?;
+    let id = new_id();
+    conn.execute(
+        "INSERT INTO drafts(id, kind, target_id, payload_json, source, created_at) VALUES (?1,'transaction',NULL,?2,?3,?4)",
+        params![id, p.to_string(), source, now()],
+    )?;
+    Ok(json!({ "draftId": id, "status": "pending", "message": "Saved as a draft. The user confirms it in Finance; nothing was recorded yet." }))
+}
+
+pub fn transaction_drafts(conn: &Connection) -> Result<Vec<Value>> {
+    let rows = conn
+        .prepare("SELECT id, payload_json, source, created_at FROM drafts WHERE kind='transaction' AND status='pending' ORDER BY created_at")?
+        .query_map([], |r| Ok(json!({ "id": r.get::<_, String>(0)?, "payload": serde_json::from_str::<Value>(&r.get::<_, String>(1)?).unwrap_or(Value::Null), "source": r.get::<_, String>(2)?, "createdAt": r.get::<_, String>(3)? })))?
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(rows)
+}
+
+/// Applies (with the account the user picked) or discards a transaction draft.
+pub fn resolve_transaction_draft(conn: &Connection, id: &str, account_id: Option<&str>) -> Result<Value> {
+    let payload: String = conn
+        .query_row("SELECT payload_json FROM drafts WHERE id=?1 AND kind='transaction' AND status='pending'", [id], |r| r.get(0))
+        .optional()?
+        .ok_or_else(|| AppError::NotFound("draft".into()))?;
+    let tx = crate::infrastructure::database::begin(conn)?;
+    let applied = match account_id {
+        Some(acc) => {
+            let mut p: Value = serde_json::from_str(&payload)?;
+            p["accountId"] = json!(acc);
+            add_transaction(&tx, &p)?;
+            true
+        }
+        None => false,
+    };
+    tx.execute("UPDATE drafts SET status=?2, resolved_at=?3 WHERE id=?1", params![id, if applied { "applied" } else { "discarded" }, now()])?;
+    tx.commit()?;
+    Ok(json!({ "applied": applied }))
+}

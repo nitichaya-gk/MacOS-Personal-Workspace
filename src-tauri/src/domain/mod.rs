@@ -1,5 +1,6 @@
 //! Domain rules shared by the UI commands and the MCP adapter.
 
+pub mod formula;
 pub mod growth;
 pub mod properties;
 pub mod query;

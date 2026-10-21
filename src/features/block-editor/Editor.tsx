@@ -9,7 +9,7 @@ import {
 import { BlockNoteView } from "@blocknote/mantine";
 import { useColorScheme, useStore } from "../../app/providers/store";
 import { useI18n } from "../../app/providers/i18n";
-import { api } from "../../services/desktop-bridge/api";
+import { api, rpc } from "../../services/desktop-bridge/api";
 import type { PageMeta } from "../../shared/types";
 import { debounce } from "../../shared/utils";
 import { kindIcon } from "../../components/ui/Icon";
@@ -18,6 +18,34 @@ import { schema, type WorkspaceEditor } from "./schema";
 function plainText(content: unknown): string {
   if (!Array.isArray(content)) return "";
   return content.map((c: { text?: string; content?: unknown }) => c.text ?? plainText(c.content)).join("");
+}
+
+/** Drag-handle menu entry: attach a private comment to this block. */
+function CommentItem({ pageId }: { pageId: string }) {
+  const Components = useComponentsContext()!;
+  const editor = useBlockNoteEditor(schema);
+  const block = useExtensionState(SideMenuExtension, { editor, selector: (s) => s?.block });
+  const { prompt, fail, toast } = useStore();
+  const { t } = useI18n();
+  if (!block) return null;
+  return (
+    <Components.Generic.Menu.Item
+      className="bn-menu-item"
+      onClick={async () => {
+        const body = await prompt({ title: t("Comment on this block"), placeholder: t("Private note") });
+        if (!body?.trim()) return;
+        try {
+          await rpc("comments.add", { pageId, blockId: block.id, quote: plainText(block.content), body });
+          window.dispatchEvent(new Event("pw:comments"));
+          toast(t("Comment added — see the inspector"));
+        } catch (e) {
+          fail(e);
+        }
+      }}
+    >
+      {t("Comment")}
+    </Components.Generic.Menu.Item>
+  );
 }
 
 /** Drag-handle menu entry: turn a checklist item into a real Task (opt-in, so no duplicates are created automatically). */
@@ -237,6 +265,7 @@ export function BlockEditor({ page, initialBlocks, readOnly }: { page: PageMeta;
                 <RemoveBlockItem>{t("Delete")}</RemoveBlockItem>
                 <BlockColorsItem>{t("Colors")}</BlockColorsItem>
                 <ConvertToTaskItem pageId={page.id} />
+                <CommentItem pageId={page.id} />
               </DragHandleMenu>
             )}
           />

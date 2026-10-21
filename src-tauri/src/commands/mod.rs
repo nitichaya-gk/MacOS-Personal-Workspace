@@ -2,7 +2,7 @@
 //! (method name + JSON params), plus a few commands that need the window or raw bytes.
 
 use crate::application::workspace::{self, Workspace};
-use crate::application::{assets, canvases, databases, export, finance, goals, habits, mcp_access, pages, reviews, sections, settings, skills, tasks, templates};
+use crate::application::{assets, automations, canvases, comments, forms, versions, databases, export, finance, goals, habits, mcp_access, pages, reviews, sections, settings, skills, tasks, templates};
 use crate::error::{invalid, AppError, Result};
 use crate::infrastructure::{backup, filesystem, search};
 use crate::AppState;
@@ -382,12 +382,123 @@ pub fn dispatch(ws: &mut Workspace, method: &str, p: &Value) -> Result<Value> {
         "finance.allocate" => finance::allocate(c, s(p, "id")?, p),
         "finance.audit" => to(finance::audit_trail(c, opt(p, "limit").unwrap_or(100))?),
 
+        // forms
+        "forms.list" => to(forms::list(c, s(p, "databaseId")?)?),
+        "forms.get" => forms::get(c, s(p, "id")?),
+        "forms.create" => forms::create(c, s(p, "databaseId")?, opt::<String>(p, "name").as_deref().unwrap_or("")),
+        "forms.update" => forms::update(c, s(p, "id")?, p.get("patch").unwrap_or(&json!({}))),
+        "forms.delete" => {
+            forms::delete(c, s(p, "id")?)?;
+            ok()
+        }
+        "forms.submit" => forms::submit(c, s(p, "id")?, &opt(p, "values").unwrap_or_default()),
+
+        // automations
+        "automations.list" => to(automations::list(c)?),
+        "automations.create" => automations::create(c, opt::<String>(p, "name").as_deref().unwrap_or(""), p.get("config").unwrap_or(&json!({}))),
+        "automations.update" => automations::update(c, s(p, "id")?, p.get("patch").unwrap_or(&json!({}))),
+        "automations.delete" => {
+            automations::delete(c, s(p, "id")?)?;
+            ok()
+        }
+        "automations.runs" => to(automations::runs(c, opt::<String>(p, "id").as_deref(), opt(p, "limit").unwrap_or(50))?),
+        "automations.retry" => automations::retry(c, s(p, "runId")?),
+
+        // versions & comments
+        "versions.list" => to(versions::list(c, s(p, "pageId")?)?),
+        "versions.get" => versions::get(c, s(p, "id")?),
+        "versions.snapshot" => {
+            versions::snapshot(c, s(p, "pageId")?, "manual")?;
+            ok()
+        }
+        "versions.restore" => versions::restore(c, s(p, "id")?),
+        "comments.list" => to(comments::list(c, s(p, "pageId")?)?),
+        "comments.add" => comments::add(c, s(p, "pageId")?, opt::<String>(p, "blockId").as_deref(), opt::<String>(p, "quote").as_deref().unwrap_or(""), s(p, "body")?),
+        "comments.update" => {
+            comments::update(c, s(p, "id")?, opt::<String>(p, "body").as_deref(), opt(p, "resolved"))?;
+            ok()
+        }
+        "comments.delete" => {
+            comments::delete(c, s(p, "id")?)?;
+            ok()
+        }
+
         // today & reviews
         "growth.today" => reviews::today_plan(c),
         "reviews.currentWeek" => Ok(json!({ "period": reviews::current_week(c) })),
         "reviews.get" => reviews::get(c, &opt::<String>(p, "period").unwrap_or_else(|| reviews::current_week(c))),
         "reviews.save" => reviews::save(c, s(p, "period")?, p.get("review").unwrap_or(&json!({}))),
         "reviews.list" => to(reviews::list(c)?),
+
+        // learning hub
+        "learning.overview" => crate::application::learning::overview(c),
+        "learning.saveCourse" => crate::application::learning::save_course(c, opt::<String>(p, "id").as_deref(), p.get("course").unwrap_or(&json!({}))),
+        "learning.deleteCourse" => {
+            crate::application::learning::delete_course(c, s(p, "id")?)?;
+            ok()
+        }
+        "learning.saveTopic" => crate::application::learning::save_topic(c, opt::<String>(p, "id").as_deref(), p.get("topic").unwrap_or(&json!({}))),
+        "learning.deleteTopic" => {
+            crate::application::learning::delete_topic(c, s(p, "id")?)?;
+            ok()
+        }
+        "learning.review" => crate::application::learning::review(c, s(p, "id")?, opt(p, "quality").unwrap_or(3)),
+        "learning.saveResource" => crate::application::learning::save_resource(c, opt::<String>(p, "id").as_deref(), p.get("resource").unwrap_or(&json!({}))),
+        "learning.deleteResource" => {
+            crate::application::learning::delete_resource(c, s(p, "id")?)?;
+            ok()
+        }
+
+        // finance extras
+        "finance.recurring" => to(finance::recurring(c)?),
+        "finance.saveRecurring" => finance::save_recurring(c, opt::<String>(p, "id").as_deref(), p.get("recurring").unwrap_or(&json!({}))),
+        "finance.deleteRecurring" => {
+            finance::delete_recurring(c, s(p, "id")?)?;
+            ok()
+        }
+        "finance.settleRecurring" => finance::settle_recurring(c, s(p, "id")?, opt(p, "post").unwrap_or(true)),
+        "finance.importCsv" => finance::import_csv(c, s(p, "accountId")?, s(p, "csv")?, p.get("mapping").unwrap_or(&json!({})), opt(p, "dryRun").unwrap_or(true)),
+        "finance.drafts" => to(finance::transaction_drafts(c)?),
+        "finance.resolveDraft" => finance::resolve_transaction_draft(c, s(p, "id")?, opt::<String>(p, "accountId").as_deref()),
+        "goals.orphans" => goals::orphans(c),
+        "backup.exportEncrypted" => backup::export_encrypted(c, &ws.root, &ws.manifest()?, &user_path(p, "dest")?, s(p, "password")?),
+        "backup.restoreEncrypted" => {
+            let dest = user_path(p, "dest")?;
+            if dest.starts_with(&ws.root) {
+                return invalid("restore into a folder outside the current workspace");
+            }
+            backup::restore_encrypted(&user_path(p, "source")?, &dest, s(p, "password")?)
+        }
+        "backup.isEncrypted" => Ok(json!({ "encrypted": backup::is_encrypted(&std::fs::read(user_path(p, "path")?)?.get(..8).unwrap_or(&[]).to_vec()) })),
+
+        // timetable
+        "timetable.week" => crate::application::timetable::week(c, &opt::<String>(p, "start").unwrap_or_else(|| tasks::today(c))),
+        "timetable.today" => to(crate::application::timetable::today(c)?),
+        "timetable.create" => crate::application::timetable::create(c, p.get("block").unwrap_or(&json!({}))),
+        "timetable.update" => match opt::<String>(p, "date") {
+            Some(d) => crate::application::timetable::update_occurrence(c, s(p, "id")?, &d, p.get("patch").unwrap_or(&json!({}))),
+            None => crate::application::timetable::update(c, s(p, "id")?, p.get("patch").unwrap_or(&json!({}))),
+        },
+        "timetable.delete" => {
+            crate::application::timetable::delete(c, s(p, "id")?, opt::<String>(p, "date").as_deref())?;
+            ok()
+        }
+
+        // static site, background agent
+        "site.export" => {
+            let ids: Vec<String> = arg(p, "pageIds")?;
+            let svgs: std::collections::HashMap<String, String> = opt(p, "svgs").unwrap_or_default();
+            crate::application::site::export(ws, &ids, opt(p, "includeChildren").unwrap_or(true), opt::<String>(p, "title").as_deref().unwrap_or("Site"), &user_path(p, "dest")?, &svgs)
+        }
+        "agent.status" => Ok(json!({ "enabled": crate::integrations::agent::status() })),
+        "agent.set" => {
+            if opt(p, "enabled").unwrap_or(false) {
+                crate::integrations::agent::enable()?;
+            } else {
+                crate::integrations::agent::disable()?;
+            }
+            Ok(json!({ "enabled": crate::integrations::agent::status() }))
+        }
 
         // MCP
         "mcp.status" => {

@@ -45,6 +45,21 @@ impl RecordData {
     }
 }
 
+/// Formula and rollup results are filtered/sorted by the kind of value they produce.
+pub fn effective<'a>(p: &'a PropDef, v: Value) -> (&'a str, Value) {
+    if !matches!(p.ptype.as_str(), "formula" | "rollup") {
+        return (p.ptype.as_str(), v);
+    }
+    match &v {
+        Value::Number(_) => ("number", v),
+        Value::Bool(_) => ("checkbox", v),
+        Value::Object(o) if o.contains_key("start") => ("date", v),
+        Value::Object(_) => ("text", Value::Null),
+        Value::Array(a) => ("text", Value::String(a.iter().map(|x| match x { Value::String(s) => s.clone(), other => other.to_string() }).collect::<Vec<_>>().join(", "))),
+        _ => ("text", v),
+    }
+}
+
 fn is_empty(v: &Value) -> bool {
     match v {
         Value::Null => true,
@@ -73,7 +88,7 @@ pub fn matches(filter: &Value, rec: &RecordData, props: &HashMap<String, PropDef
     };
     let op = filter.get("operator").and_then(|o| o.as_str()).unwrap_or("");
     let arg = filter.get("value").cloned().unwrap_or(Value::Null);
-    let v = rec.value_of(p);
+    let (ptype, v) = effective(p, rec.value_of(p));
     match op {
         "is_empty" => return is_empty(&v),
         "is_not_empty" => return !is_empty(&v),
@@ -83,7 +98,15 @@ pub fn matches(filter: &Value, rec: &RecordData, props: &HashMap<String, PropDef
     if arg.is_null() || arg.as_str() == Some("") {
         return true;
     }
-    match p.ptype.as_str() {
+    match ptype {
+        "relation" => {
+            let has = v.as_array().is_some_and(|a| a.iter().any(|x| x.as_str() == arg.as_str()));
+            match op {
+                "contains" => has,
+                "not_contains" => !has,
+                _ => true,
+            }
+        }
         "title" | "text" | "url" | "email" => {
             let s = v.as_str().unwrap_or("").to_lowercase();
             let a = arg.as_str().unwrap_or("").to_lowercase();
@@ -133,7 +156,7 @@ pub fn matches(filter: &Value, rec: &RecordData, props: &HashMap<String, PropDef
             op != "is" || checked == arg.as_bool().unwrap_or(true)
         }
         "date" | "created_time" | "last_edited_time" => {
-            let Some(d) = rec.date_of(p) else { return false };
+            let Some(d) = rec.date_of(p).or_else(|| v.get("start").and_then(|s| s.as_str()).map(|s| s.chars().take(10).collect())) else { return false };
             let a = arg.as_str().unwrap_or("");
             match op {
                 "is" => d == a,
@@ -156,7 +179,16 @@ fn option_index(p: &PropDef, id: &str) -> usize {
 }
 
 fn compare_values(p: &PropDef, a: &RecordData, b: &RecordData) -> Ordering {
-    let (va, vb) = (a.value_of(p), b.value_of(p));
+    let (ta, va) = effective(p, a.value_of(p));
+    let (_, vb) = effective(p, b.value_of(p));
+    if matches!(p.ptype.as_str(), "formula" | "rollup") {
+        return match ta {
+            "number" => va.as_f64().partial_cmp(&vb.as_f64()).unwrap_or(Ordering::Equal),
+            "checkbox" => va.as_bool().cmp(&vb.as_bool()),
+            "date" => va.get("start").and_then(|x| x.as_str()).cmp(&vb.get("start").and_then(|x| x.as_str())),
+            _ => va.as_str().unwrap_or("").to_lowercase().cmp(&vb.as_str().unwrap_or("").to_lowercase()),
+        };
+    }
     // Empty values always sort last regardless of direction is handled by the caller.
     match p.ptype.as_str() {
         "number" => va.as_f64().partial_cmp(&vb.as_f64()).unwrap_or(Ordering::Equal),

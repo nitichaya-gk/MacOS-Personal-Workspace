@@ -427,7 +427,13 @@ pub fn page_text(conn: &Connection, page_id: &str) -> Result<String> {
     Ok(parts.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n"))
 }
 
+/// Autosave entry point: keeps a periodic revision of the previous content, then saves.
 pub fn save_blocks(conn: &Connection, page_id: &str, blocks: &Value) -> Result<String> {
+    super::versions::maybe_snapshot(conn, page_id)?;
+    save_blocks_raw(conn, page_id, blocks)
+}
+
+pub fn save_blocks_raw(conn: &Connection, page_id: &str, blocks: &Value) -> Result<String> {
     let me = get_meta(conn, page_id)?;
     if me.deleted_at.is_some() {
         return invalid("page is in the trash");

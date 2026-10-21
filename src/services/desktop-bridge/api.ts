@@ -138,6 +138,9 @@ export const api = {
     create: () => rpc<BackupInfo>("backup.create"),
     exportZip: (dest: string) => rpc<{ path: string; sizeBytes: number }>("backup.exportZip", { dest }),
     restore: (source: string, dest: string) => rpc<{ path: string; integrity: Record<string, unknown> }>("backup.restore", { source, dest }),
+    exportEncrypted: (dest: string, password: string) => rpc<{ path: string; sizeBytes: number }>("backup.exportEncrypted", { dest, password }),
+    restoreEncrypted: (source: string, dest: string, password: string) => rpc<{ path: string; integrity: Record<string, unknown> }>("backup.restoreEncrypted", { source, dest, password }),
+    isEncrypted: (path: string) => rpc<{ encrypted: boolean }>("backup.isEncrypted", { path }),
   },
   exports: {
     pageMarkdown: (id: string, dest: string) => rpc<{ path: string; warnings: string[] }>("export.pageMarkdown", { id, dest }),

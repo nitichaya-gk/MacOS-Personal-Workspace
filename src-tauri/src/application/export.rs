@@ -126,15 +126,7 @@ fn database_table(ctx: &mut Ctx, db_id: &str) -> String {
     for r in &res.records {
         let cells: Vec<String> = props
             .iter()
-            .map(|p| {
-                let v = match p.ptype.as_str() {
-                    "title" => json!(r.title),
-                    "created_time" => json!(r.created_at),
-                    "last_edited_time" => json!(r.updated_at),
-                    _ => r.values.get(&p.id).cloned().unwrap_or(Value::Null),
-                };
-                crate::domain::properties::display_value(&p.ptype, &p.config, &v).replace('|', "\\|")
-            })
+            .map(|p| databases::record_display(p, r).replace('|', "\\|"))
             .collect();
         s.push_str(&format!("| {} |\n", cells.join(" | ")));
     }
@@ -230,8 +222,7 @@ pub fn page_markdown(conn: &Connection, page_id: &str, asset_prefix: Option<Stri
                     if p.ptype == "title" {
                         continue;
                     }
-                    let v = r.values.get(&p.id).cloned().unwrap_or(Value::Null);
-                    let s = crate::domain::properties::display_value(&p.ptype, &p.config, &v);
+                    let s = databases::record_display(&p, &r);
                     if !s.is_empty() {
                         out.push(format!("- **{}:** {s}", p.name));
                     }
@@ -249,6 +240,18 @@ pub fn page_markdown(conn: &Connection, page_id: &str, asset_prefix: Option<Stri
         text = text.replace("\n\n\n", "\n\n");
     }
     Ok(Markdown { text: text.trim_end().to_string() + "\n", warnings: ctx.warnings, assets: ctx.assets })
+}
+
+/// Markdown for an arbitrary block list (used for version previews).
+pub fn blocks_to_markdown(conn: &Connection, title: &str, list: &[Value]) -> String {
+    let mut ctx = Ctx { conn, asset_prefix: None, warnings: vec![], assets: vec![] };
+    let mut out = vec![format!("# {}", if title.is_empty() { "Untitled" } else { title }), String::new()];
+    blocks(&mut ctx, list, 0, &mut out);
+    let mut text = out.join("\n");
+    while text.contains("\n\n\n") {
+        text = text.replace("\n\n\n", "\n\n");
+    }
+    text.trim_end().to_string() + "\n"
 }
 
 /// Writes `<dest>.md` and copies used attachments into `<stem>_assets/` next to it.

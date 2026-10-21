@@ -10,6 +10,8 @@ pub struct Policy {
     pub enabled: bool,
     pub all: bool,
     pub allowed: Vec<String>,
+    /// Write grants, separate from read: section/page ids, "tasks:unassigned", "domain:goals|skills|habits".
+    pub write: Vec<String>,
 }
 
 impl Policy {
@@ -20,6 +22,11 @@ impl Policy {
             all: v.get("scope").and_then(|s| s.as_str()) == Some("all"),
             allowed: v
                 .get("allowedIds")
+                .and_then(|a| a.as_array())
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+            write: v
+                .get("writeIds")
                 .and_then(|a| a.as_array())
                 .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
                 .unwrap_or_default(),
@@ -86,6 +93,48 @@ impl Policy {
             Ok(())
         } else {
             Err(AppError::Denied(format!("{domain} data is not shared with MCP clients (Settings → MCP)")))
+        }
+    }
+
+    pub fn can_write_page(&self, conn: &Connection, page_id: &str) -> Result<bool> {
+        if !self.can_read_page(conn, page_id)? {
+            return Ok(false);
+        }
+        let me = pages::get_meta(conn, page_id)?;
+        let mut chain = pages::ancestors(conn, page_id)?;
+        chain.push(me.clone());
+        Ok(chain.iter().any(|p| self.write.contains(&p.id)) || me.section_id.as_ref().is_some_and(|s| self.write.contains(s)))
+    }
+
+    pub fn require_write_page(&self, conn: &Connection, page_id: &str) -> Result<()> {
+        if self.can_write_page(conn, page_id)? {
+            Ok(())
+        } else {
+            Err(AppError::Denied(format!("{page_id} is not open for MCP writes (Settings → MCP → Allow changes)")))
+        }
+    }
+
+    pub fn require_write_section(&self, section_id: &str) -> Result<()> {
+        if self.enabled && self.write.iter().any(|w| w == section_id) {
+            Ok(())
+        } else {
+            Err(AppError::Denied("that section is not open for MCP writes".into()))
+        }
+    }
+
+    pub fn require_write_task(&self, conn: &Connection, project_id: Option<&str>) -> Result<()> {
+        let ok = match project_id {
+            Some(p) => self.can_write_page(conn, p)?,
+            None => self.enabled && self.write.iter().any(|w| w == "tasks:unassigned"),
+        };
+        if ok { Ok(()) } else { Err(AppError::Denied("tasks in this project are not open for MCP writes".into())) }
+    }
+
+    pub fn require_write_domain(&self, domain: &str) -> Result<()> {
+        if self.enabled && domain != "finance" && self.write.iter().any(|w| w == &format!("domain:{domain}")) {
+            Ok(())
+        } else {
+            Err(AppError::Denied(format!("{domain} is not open for MCP writes")))
         }
     }
 

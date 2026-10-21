@@ -2,6 +2,7 @@
 
 use super::pages::{self, PageMeta};
 use crate::domain::properties::{self as props, convert_value, display_value, is_computed, validate_value, PROPERTY_TYPES};
+use crate::domain::formula::{self, FV};
 use crate::domain::query::{self, PropDef, RecordData};
 use crate::domain::{new_id, now};
 use crate::error::{invalid, AppError, Result};
@@ -10,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct PropertyInfo {
     pub id: String,
@@ -162,6 +163,7 @@ pub fn update_property(conn: &Connection, prop_id: &str, patch: &Value) -> Resul
         conn.execute("UPDATE database_properties SET name=?2 WHERE id=?1", params![prop_id, name.trim()])?;
     }
     if let Some(cfg) = patch.get("config") {
+        validate_config(conn, &db_id, &p, cfg)?;
         conn.execute("UPDATE database_properties SET config=?2 WHERE id=?1", params![prop_id, cfg.to_string()])?;
         // Drop values that point at options that no longer exist.
         if matches!(p.ptype.as_str(), "select" | "status" | "multi_select") {
@@ -191,8 +193,245 @@ pub fn update_property(conn: &Connection, prop_id: &str, patch: &Value) -> Resul
     if let Some(pos) = patch.get("position").and_then(|p| p.as_f64()) {
         conn.execute("UPDATE database_properties SET position=?2 WHERE id=?1", params![prop_id, pos])?;
     }
-    let _ = db_id;
     Ok(property(conn, prop_id)?.1)
+}
+
+pub const ROLLUP_FUNCTIONS: &[&str] = &["count", "count_values", "sum", "average", "min", "max", "percent_checked", "earliest", "latest", "show_original"];
+
+/// Checks formula syntax and cycles, relation targets and rollup wiring before a config is saved.
+fn validate_config(conn: &Connection, db_id: &str, p: &PropertyInfo, cfg: &Value) -> Result<()> {
+    match p.ptype.as_str() {
+        "formula" => {
+            let expr = cfg.get("expression").and_then(|e| e.as_str()).unwrap_or("");
+            formula::parse(expr).map_err(|e| AppError::Invalid(format!("Formula error: {e}")))?;
+            // Build name → referenced names for every formula in the database, with this one replaced.
+            let ps = properties(conn, db_id)?;
+            let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+            for q in ps.iter().filter(|q| q.ptype == "formula") {
+                let src = if q.id == p.id { expr.to_string() } else { q.config.get("expression").and_then(|e| e.as_str()).unwrap_or("").to_string() };
+                let mut refs = vec![];
+                if let Ok(e) = formula::parse(&src) {
+                    formula::references(&e, &mut refs);
+                }
+                graph.insert(q.name.clone(), refs);
+            }
+            fn visit(n: &str, g: &HashMap<String, Vec<String>>, path: &mut Vec<String>) -> Option<Vec<String>> {
+                if let Some(i) = path.iter().position(|x| x == n) {
+                    let mut cyc = path[i..].to_vec();
+                    cyc.push(n.to_string());
+                    return Some(cyc);
+                }
+                let refs = g.get(n)?;
+                path.push(n.to_string());
+                for r in refs {
+                    if let Some(c) = visit(r, g, path) {
+                        return Some(c);
+                    }
+                }
+                path.pop();
+                None
+            }
+            if let Some(cyc) = visit(&p.name, &graph, &mut vec![]) {
+                return invalid(format!("Circular formula: {}", cyc.join(" → ")));
+            }
+        }
+        "relation" => {
+            if let Some(t) = cfg.get("databaseId").and_then(|d| d.as_str()).filter(|d| !d.is_empty()) {
+                ensure_db(conn, t)?;
+            }
+        }
+        "rollup" => {
+            let rel = cfg.get("relationPropertyId").and_then(|v| v.as_str()).unwrap_or("");
+            let func = cfg.get("function").and_then(|v| v.as_str()).unwrap_or("count");
+            if !ROLLUP_FUNCTIONS.contains(&func) {
+                return invalid("unknown rollup function");
+            }
+            if !rel.is_empty() {
+                let (rdb, rp) = property(conn, rel)?;
+                if rdb != db_id || rp.ptype != "relation" {
+                    return invalid("a rollup must use a relation property of this database");
+                }
+                if let Some(tp) = cfg.get("targetPropertyId").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+                    let (tdb, _) = property(conn, tp)?;
+                    if Some(tdb.as_str()) != rp.config.get("databaseId").and_then(|d| d.as_str()) {
+                        return invalid("the rolled-up property must belong to the related database");
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+// ---------- derived values: relations, rollups, formulas ----------
+
+fn titles_for(conn: &Connection, ids: &[String]) -> Result<HashMap<String, String>> {
+    let mut out = HashMap::new();
+    let mut stmt = conn.prepare("SELECT title FROM pages WHERE id=?1 AND deleted_at IS NULL")?;
+    for id in ids {
+        if out.contains_key(id) {
+            continue;
+        }
+        if let Some(t) = stmt.query_row([id], |r| r.get::<_, String>(0)).optional()? {
+            out.insert(id.clone(), t);
+        }
+    }
+    Ok(out)
+}
+
+fn json_to_fv(v: &Value) -> FV {
+    match v {
+        Value::Number(n) => FV::Num(n.as_f64().unwrap_or(0.0)),
+        Value::String(s) => FV::Text(s.clone()),
+        Value::Bool(b) => FV::Bool(*b),
+        Value::Array(a) => FV::List(a.iter().map(json_to_fv).collect()),
+        Value::Object(o) => match o.get("start").and_then(|s| s.as_str()).and_then(crate::domain::growth::date) {
+            Some(d) => FV::Date(d),
+            None => FV::Null,
+        },
+        Value::Null => FV::Null,
+    }
+}
+
+/// A property value as a formula value (select → option name, relation → titles, …).
+fn prop_fv(p: &PropertyInfo, rec: &RecordData, titles: &HashMap<String, String>) -> FV {
+    let date = |s: &str| crate::domain::growth::date(s).map(FV::Date).unwrap_or(FV::Null);
+    match p.ptype.as_str() {
+        "title" => FV::Text(rec.title.clone()),
+        "created_time" => date(&rec.created_date),
+        "last_edited_time" => date(&rec.updated_date),
+        t => {
+            let v = rec.values.get(&p.id).cloned().unwrap_or(Value::Null);
+            match t {
+                "checkbox" => FV::Bool(v.as_bool() == Some(true)),
+                "select" | "status" => v.as_str().and_then(|id| props::option_name(&p.config, id)).map(FV::Text).unwrap_or(FV::Null),
+                "multi_select" => FV::List(v.as_array().into_iter().flatten().filter_map(|id| id.as_str().and_then(|id| props::option_name(&p.config, id))).map(FV::Text).collect()),
+                "relation" => FV::List(v.as_array().into_iter().flatten().filter_map(|id| id.as_str().and_then(|id| titles.get(id))).map(|t| FV::Text(t.clone())).collect()),
+                "files" => FV::List(v.as_array().into_iter().flatten().filter_map(|f| f.get("name").and_then(|n| n.as_str())).map(|n| FV::Text(n.into())).collect()),
+                _ if v.get("error").is_some() => FV::Null,
+                _ => json_to_fv(&v),
+            }
+        }
+    }
+}
+
+type Materialized = (Vec<PropertyInfo>, HashMap<String, RecordData>, HashMap<String, String>);
+
+/// Fills rollup and formula values into `recs` and returns titles of related records.
+/// `depth` bounds rollups that read other databases' rollups (and self-relations).
+fn compute_derived(conn: &Connection, ps: &[PropertyInfo], recs: &mut [RecordData], depth: usize, cache: &mut HashMap<String, Materialized>) -> Result<HashMap<String, String>> {
+    let mut ids = vec![];
+    for p in ps.iter().filter(|p| p.ptype == "relation") {
+        for r in recs.iter() {
+            ids.extend(r.values.get(&p.id).and_then(|v| v.as_array()).into_iter().flatten().filter_map(|x| x.as_str().map(String::from)));
+        }
+    }
+    let titles = titles_for(conn, &ids)?;
+
+    for p in ps.iter().filter(|p| p.ptype == "rollup") {
+        let rel = p.config.get("relationPropertyId").and_then(|v| v.as_str()).and_then(|id| ps.iter().find(|x| x.id == id));
+        let func = p.config.get("function").and_then(|v| v.as_str()).unwrap_or("count");
+        let Some(rel) = rel else {
+            recs.iter_mut().for_each(|r| { r.values.insert(p.id.clone(), json!({ "error": "choose a relation property" })); });
+            continue;
+        };
+        let target_db = rel.config.get("databaseId").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if depth >= 2 {
+            recs.iter_mut().for_each(|r| { r.values.insert(p.id.clone(), json!({ "error": "rollups are nested too deeply" })); });
+            continue;
+        }
+        if !cache.contains_key(&target_db) && !target_db.is_empty() {
+            let tps = properties(conn, &target_db)?;
+            let mut trecs = load_records(conn, &target_db, false, None)?;
+            let tt = compute_derived(conn, &tps, &mut trecs, depth + 1, cache)?;
+            cache.insert(target_db.clone(), (tps, trecs.into_iter().map(|r| (r.id.clone(), r)).collect(), tt));
+        }
+        let Some((tps, trecs, ttitles)) = cache.get(&target_db) else { continue };
+        let target = p.config.get("targetPropertyId").and_then(|v| v.as_str()).and_then(|id| tps.iter().find(|x| x.id == id));
+        for r in recs.iter_mut() {
+            let linked: Vec<&RecordData> = r.values.get(&rel.id).and_then(|v| v.as_array()).into_iter().flatten().filter_map(|x| x.as_str().and_then(|id| trecs.get(id))).collect();
+            let vals: Vec<FV> = match target {
+                Some(t) => linked.iter().map(|lr| prop_fv(t, lr, ttitles)).flat_map(|v| match v { FV::List(l) => l, x => vec![x] }).collect(),
+                None => vec![],
+            };
+            let present: Vec<&FV> = vals.iter().filter(|v| !matches!(v, FV::Null) && v.as_text() != "").collect();
+            let nums: Vec<f64> = present.iter().filter_map(|v| match v { FV::Num(n) => Some(*n), _ => None }).collect();
+            let dates: Vec<chrono::NaiveDate> = present.iter().filter_map(|v| match v { FV::Date(d) => Some(*d), _ => None }).collect();
+            let out = match func {
+                "count" => FV::Num(linked.len() as f64),
+                "count_values" => FV::Num(present.len() as f64),
+                "sum" => FV::Num(nums.iter().sum()),
+                "average" if !nums.is_empty() => FV::Num(nums.iter().sum::<f64>() / nums.len() as f64),
+                "min" if !nums.is_empty() => FV::Num(nums.iter().cloned().fold(f64::INFINITY, f64::min)),
+                "max" if !nums.is_empty() => FV::Num(nums.iter().cloned().fold(f64::NEG_INFINITY, f64::max)),
+                "percent_checked" if !vals.is_empty() => FV::Num((vals.iter().filter(|v| **v == FV::Bool(true)).count() as f64 / vals.len() as f64 * 1000.0).round() / 10.0),
+                "earliest" => dates.iter().min().map(|d| FV::Date(*d)).unwrap_or(FV::Null),
+                "latest" => dates.iter().max().map(|d| FV::Date(*d)).unwrap_or(FV::Null),
+                "show_original" => FV::List(present.into_iter().cloned().collect()),
+                _ => FV::Null,
+            };
+            r.values.insert(p.id.clone(), if target.is_none() && func != "count" { json!({ "error": "choose the property to roll up" }) } else { out.to_json() });
+        }
+    }
+
+    let formulas: Vec<(&PropertyInfo, std::result::Result<formula::Expr, String>)> = ps
+        .iter()
+        .filter(|p| p.ptype == "formula")
+        .map(|p| (p, formula::parse(p.config.get("expression").and_then(|e| e.as_str()).unwrap_or(""))))
+        .collect();
+    if formulas.is_empty() {
+        return Ok(titles);
+    }
+    let today = crate::domain::growth::date(&super::tasks::today(conn)).unwrap_or_else(|| chrono::Utc::now().date_naive());
+
+    fn eval_prop(
+        pid: &str, rec: &RecordData, ps: &[PropertyInfo], formulas: &[(&PropertyInfo, std::result::Result<formula::Expr, String>)],
+        titles: &HashMap<String, String>, today: chrono::NaiveDate, stack: &mut Vec<String>, done: &mut HashMap<String, std::result::Result<FV, String>>,
+    ) -> std::result::Result<FV, String> {
+        if let Some(r) = done.get(pid) {
+            return r.clone();
+        }
+        let (fp, expr) = formulas.iter().find(|(p, _)| p.id == pid).ok_or("unknown formula")?;
+        if stack.iter().any(|s| s == pid) {
+            let names: Vec<String> = stack.iter().filter_map(|id| ps.iter().find(|p| &p.id == id).map(|p| p.name.clone())).chain([fp.name.clone()]).collect();
+            return Err(format!("circular reference: {}", names.join(" → ")));
+        }
+        let expr = expr.clone()?;
+        stack.push(pid.to_string());
+        let result = {
+            let mut resolve = |name: &str| -> std::result::Result<FV, String> {
+                let p = ps.iter().find(|p| p.name == name).or_else(|| ps.iter().find(|p| p.name.eq_ignore_ascii_case(name))).ok_or(format!("no property named “{name}”"))?;
+                if p.ptype == "formula" {
+                    eval_prop(&p.id, rec, ps, formulas, titles, today, stack, done)
+                } else {
+                    Ok(prop_fv(p, rec, titles))
+                }
+            };
+            formula::eval(&expr, &mut resolve, today, 0)
+        };
+        stack.pop();
+        done.insert(pid.to_string(), result.clone());
+        result
+    }
+
+    for r in recs.iter_mut() {
+        let mut done = HashMap::new();
+        let results: Vec<(String, Value)> = formulas
+            .iter()
+            .map(|(p, _)| {
+                let v = match eval_prop(&p.id, r, ps, &formulas, &titles, today, &mut vec![], &mut done) {
+                    Ok(v) => v.to_json(),
+                    Err(e) => json!({ "error": e }),
+                };
+                (p.id.clone(), v)
+            })
+            .collect();
+        for (k, v) in results {
+            r.values.insert(k, v);
+        }
+    }
+    Ok(titles)
 }
 
 /// Adds an option to a select/status/multi-select property and returns its id.
@@ -269,15 +508,19 @@ pub fn change_property_type(conn: &Connection, prop_id: &str, new_type: &str, ap
 
 // ---------- views ----------
 
+pub const VIEW_TYPES: &[&str] = &["table", "board", "calendar", "list", "timeline", "gallery", "chart"];
+
 pub fn add_view(conn: &Connection, db_id: &str, name: &str, vtype: &str) -> Result<ViewInfo> {
     ensure_db(conn, db_id)?;
-    if !matches!(vtype, "table" | "board" | "calendar" | "list") {
-        return invalid("view type must be table, board, calendar or list");
+    if !VIEW_TYPES.contains(&vtype) {
+        return invalid("unknown view type");
     }
     let ps = properties(conn, db_id)?;
     let config = match vtype {
         "board" => json!({ "groupBy": ps.iter().find(|p| matches!(p.ptype.as_str(), "status" | "select")).map(|p| p.id.clone()) }),
-        "calendar" => json!({ "dateProperty": ps.iter().find(|p| p.ptype == "date").map(|p| p.id.clone()) }),
+        "calendar" | "timeline" => json!({ "dateProperty": ps.iter().find(|p| p.ptype == "date").map(|p| p.id.clone()) }),
+        "gallery" => json!({ "coverProperty": ps.iter().find(|p| p.ptype == "files").map(|p| p.id.clone()) }),
+        "chart" => json!({ "chartType": "bar", "groupBy": ps.iter().find(|p| matches!(p.ptype.as_str(), "status" | "select")).map(|p| p.id.clone()), "aggregate": "count" }),
         _ => json!({}),
     };
     let pos: f64 = conn.query_row("SELECT COALESCE(MAX(position)+1, 0) FROM database_views WHERE database_id=?1", [db_id], |r| r.get(0))?;
@@ -298,7 +541,7 @@ pub fn update_view(conn: &Connection, view_id: &str, patch: &Value) -> Result<Vi
         conn.execute("UPDATE database_views SET name=?2 WHERE id=?1", params![view_id, n.trim()])?;
     }
     if let Some(t) = patch.get("type").and_then(|n| n.as_str()) {
-        if !matches!(t, "table" | "board" | "calendar" | "list") {
+        if !VIEW_TYPES.contains(&t) {
             return invalid("unknown view type");
         }
         conn.execute("UPDATE database_views SET type=?2 WHERE id=?1", params![view_id, t])?;
@@ -332,12 +575,28 @@ pub struct RecordOut {
     pub created_at: String,
     pub updated_at: String,
     pub values: Map<String, Value>,
+    /// Titles of records referenced by this record's relation properties (deleted ones are absent).
+    pub relation_titles: HashMap<String, String>,
 }
 
 impl From<RecordData> for RecordOut {
     fn from(r: RecordData) -> Self {
-        RecordOut { id: r.id, title: r.title, icon: r.icon, created_at: r.created_at, updated_at: r.updated_at, values: r.values }
+        RecordOut { id: r.id, title: r.title, icon: r.icon, created_at: r.created_at, updated_at: r.updated_at, values: r.values, relation_titles: HashMap::new() }
     }
+}
+
+fn to_out(r: RecordData, ps: &[PropertyInfo], titles: &HashMap<String, String>) -> RecordOut {
+    let mut rel = HashMap::new();
+    for p in ps.iter().filter(|p| p.ptype == "relation") {
+        for id in r.values.get(&p.id).and_then(|v| v.as_array()).into_iter().flatten().filter_map(|x| x.as_str()) {
+            if let Some(t) = titles.get(id) {
+                rel.insert(id.to_string(), t.clone());
+            }
+        }
+    }
+    let mut out = RecordOut::from(r);
+    out.relation_titles = rel;
+    out
 }
 
 fn local_date(ts: &str, tz: &chrono_tz::Tz) -> String {
@@ -374,10 +633,12 @@ fn load_records(conn: &Connection, db_id: &str, templates: bool, only: Option<&s
         None => stmt.query_map(params![db_id, templates as i64], map_row)?.collect::<std::result::Result<_, _>>()?,
     };
     let index: HashMap<String, usize> = recs.iter().enumerate().map(|(i, r)| (r.id.clone(), i)).collect();
+    // A single record reads only its own values (keeps edits fast in large databases).
     let mut vstmt = conn.prepare(
-        "SELECT v.record_id, v.property_id, v.value FROM record_values v JOIN database_records r ON r.id = v.record_id WHERE r.database_id=?1",
+        "SELECT v.record_id, v.property_id, v.value FROM record_values v JOIN database_records r ON r.id = v.record_id
+         WHERE r.database_id=?1 AND (?2 IS NULL OR v.record_id = ?2)",
     )?;
-    let vals = vstmt.query_map([db_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+    let vals = vstmt.query_map(params![db_id, only], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
     for v in vals {
         let (rid, pid, raw) = v?;
         if let Some(&i) = index.get(&rid) {
@@ -425,6 +686,7 @@ pub fn query(conn: &Connection, db_id: &str, spec: &QuerySpec) -> Result<QueryRe
     let filter = spec.filter.clone().or_else(|| view_cfg.get("filter").cloned()).unwrap_or(Value::Null);
     let sorts = spec.sorts.clone().or_else(|| view_cfg.get("sorts").and_then(|s| s.as_array()).cloned()).unwrap_or_default();
     let mut recs = load_records(conn, db_id, spec.templates, None)?;
+    let titles = compute_derived(conn, &ps, &mut recs, 0, &mut HashMap::new())?;
     if !filter.is_null() {
         recs.retain(|r| query::matches(&filter, r, &defs));
     }
@@ -437,7 +699,7 @@ pub fn query(conn: &Connection, db_id: &str, spec: &QuerySpec) -> Result<QueryRe
     query::sort(&mut recs, &sorts, &defs);
     let total = recs.len();
     let limit = spec.limit.unwrap_or(500).clamp(1, 5000);
-    let records = recs.into_iter().skip(spec.offset).take(limit).map(RecordOut::from).collect();
+    let records = recs.into_iter().skip(spec.offset).take(limit).map(|r| to_out(r, &ps, &titles)).collect();
     Ok(QueryResult { total, offset: spec.offset, records })
 }
 
@@ -446,11 +708,10 @@ pub fn get_record(conn: &Connection, record_id: &str) -> Result<RecordOut> {
         .query_row("SELECT r.database_id, p.is_template FROM database_records r JOIN pages p ON p.id=r.id WHERE r.id=?1", [record_id], |r| Ok((r.get(0)?, r.get(1)?)))
         .optional()?
         .ok_or_else(|| AppError::NotFound(format!("record {record_id}")))?;
-    load_records(conn, &db_id, is_tpl != 0, Some(record_id))?
-        .into_iter()
-        .next()
-        .map(RecordOut::from)
-        .ok_or_else(|| AppError::NotFound(format!("record {record_id}")))
+    let ps = properties(conn, &db_id)?;
+    let mut recs = load_records(conn, &db_id, is_tpl != 0, Some(record_id))?;
+    let titles = compute_derived(conn, &ps, &mut recs, 0, &mut HashMap::new())?;
+    recs.into_iter().next().map(|r| to_out(r, &ps, &titles)).ok_or_else(|| AppError::NotFound(format!("record {record_id}")))
 }
 
 pub fn database_of_record(conn: &Connection, record_id: &str) -> Result<Option<String>> {
@@ -505,13 +766,23 @@ pub fn create_record(conn: &Connection, db_id: &str, c: CreateRecord) -> Result<
         }
     };
     for (pid, v) in &c.values {
-        set_value(conn, &id, pid, v)?;
+        write_value(conn, &id, pid, v)?;
     }
     pages::index(conn, &id)?;
+    if !c.is_template {
+        super::automations::dispatch(conn, json!({ "type": "record_created", "databaseId": db_id, "recordId": id }));
+    }
     get_record(conn, &id)
 }
 
 pub fn set_value(conn: &Connection, record_id: &str, prop_id: &str, value: &Value) -> Result<RecordOut> {
+    let db_id = write_value(conn, record_id, prop_id, value)?;
+    super::automations::dispatch(conn, json!({ "type": "record_updated", "databaseId": db_id, "recordId": record_id, "propertyId": prop_id }));
+    get_record(conn, record_id)
+}
+
+/// Validates and stores one value (no automation events). Returns the database id.
+fn write_value(conn: &Connection, record_id: &str, prop_id: &str, value: &Value) -> Result<String> {
     let (db_id, p) = property(conn, prop_id)?;
     if database_of_record(conn, record_id)?.as_deref() != Some(db_id.as_str()) {
         return invalid("property belongs to another database");
@@ -522,6 +793,25 @@ pub fn set_value(conn: &Connection, record_id: &str, prop_id: &str, value: &Valu
             conn.execute("UPDATE pages SET title=?2, updated_at=?3 WHERE id=?1", params![record_id, value.as_str().unwrap_or("").trim(), ts])?;
         }
         t if is_computed(t) => return invalid("this property is computed automatically"),
+        "relation" => {
+            let target = p.config.get("databaseId").and_then(|d| d.as_str()).filter(|d| !d.is_empty())
+                .ok_or_else(|| AppError::Invalid("choose the related database for this property first".into()))?;
+            let v = validate_value("relation", &p.config, value)?;
+            for id in v.iter().flat_map(|v| v.as_array().cloned().unwrap_or_default()) {
+                let id = id.as_str().unwrap_or("");
+                if database_of_record(conn, id)?.as_deref() != Some(target) {
+                    return invalid("a linked record does not belong to the related database");
+                }
+            }
+            match v {
+                Some(v) => conn.execute(
+                    "INSERT INTO record_values(record_id, property_id, value) VALUES (?1,?2,?3) ON CONFLICT(record_id, property_id) DO UPDATE SET value=excluded.value",
+                    params![record_id, prop_id, v.to_string()],
+                )?,
+                None => conn.execute("DELETE FROM record_values WHERE record_id=?1 AND property_id=?2", params![record_id, prop_id])?,
+            };
+            conn.execute("UPDATE pages SET updated_at=?2 WHERE id=?1", params![record_id, ts])?;
+        }
         t => {
             match validate_value(t, &p.config, value)? {
                 Some(v) => conn.execute(
@@ -535,7 +825,7 @@ pub fn set_value(conn: &Connection, record_id: &str, prop_id: &str, value: &Valu
         }
     }
     pages::index(conn, record_id)?;
-    get_record(conn, record_id)
+    Ok(db_id)
 }
 
 pub fn move_record(conn: &Connection, record_id: &str, before_id: Option<&str>) -> Result<()> {
@@ -556,17 +846,25 @@ pub fn move_record(conn: &Connection, record_id: &str, before_id: Option<&str>) 
 
 // ---------- CSV / JSON ----------
 
+/// Display text of one property of a query result (titles for relations, computed values for formulas).
+pub fn record_display(p: &PropertyInfo, r: &RecordOut) -> String {
+    match p.ptype.as_str() {
+        "title" => r.title.clone(),
+        "created_time" => r.created_at.clone(),
+        "last_edited_time" => r.updated_at.clone(),
+        "relation" => r.values.get(&p.id).and_then(|v| v.as_array()).into_iter().flatten()
+            .filter_map(|id| id.as_str().and_then(|id| r.relation_titles.get(id)).cloned())
+            .collect::<Vec<_>>().join("; "),
+        _ => display_value(&p.ptype, &p.config, r.values.get(&p.id).unwrap_or(&Value::Null)),
+    }
+}
+
 pub fn to_csv(conn: &Connection, db_id: &str) -> Result<String> {
     let ps = properties(conn, db_id)?;
-    let defs = prop_defs(&ps);
     let recs = query(conn, db_id, &QuerySpec { limit: Some(5000), ..Default::default() })?;
     let mut rows = vec![ps.iter().map(|p| p.name.clone()).collect::<Vec<_>>()];
-    let all = load_records(conn, db_id, false, None)?;
-    let mut by_id: HashMap<String, RecordData> = all.into_iter().map(|r| (r.id.clone(), r)).collect();
-    for r in recs.records {
-        if let Some(rd) = by_id.remove(&r.id) {
-            rows.push(ps.iter().map(|p| display_value(&p.ptype, &p.config, &rd.value_of(&defs[&p.id]))).collect());
-        }
+    for r in &recs.records {
+        rows.push(ps.iter().map(|p| record_display(p, r)).collect());
     }
     Ok(crate::infrastructure::export::write_csv(&rows))
 }

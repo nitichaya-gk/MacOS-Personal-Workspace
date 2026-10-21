@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useRef } from "react";
+import { Icon, kindIcon } from "../components/ui/Icon";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { MantineProvider } from "@mantine/core";
@@ -23,6 +24,12 @@ import { SkillsView } from "../features/skills/SkillsView";
 import { HabitsView } from "../features/habits/HabitsView";
 import { FinanceView } from "../features/finance/FinanceView";
 import { ReviewView } from "../features/review/ReviewView";
+import { FormFillView } from "../features/databases/forms";
+import { AutomationsView } from "../features/automations/AutomationsView";
+import { VersionHistoryHost } from "../features/pages/history";
+import { TimetableView } from "../features/timetable/TimetableView";
+import { LearningView } from "../features/learning/LearningView";
+import { SiteExportHost } from "../features/settings/SiteExport";
 
 const SettingsView = lazy(() => import("../features/settings/SettingsView").then((m) => ({ default: m.SettingsView })));
 
@@ -34,7 +41,7 @@ function Routes() {
     case "tasks":
       return <TasksView initialView={route.view} />;
     case "page":
-      return <PageView key={route.id} id={route.id} />;
+      return <PageView key={route.id} id={route.id} viewId={route.tab} />;
     case "search":
       return <SearchView initial={route.q} />;
     case "trash":
@@ -57,6 +64,14 @@ function Routes() {
       return <FinanceView />;
     case "review":
       return <ReviewView key={route.period ?? "now"} period={route.period} />;
+    case "form":
+      return <FormFillView key={route.id} id={route.id} />;
+    case "automations":
+      return <AutomationsView />;
+    case "timetable":
+      return <TimetableView />;
+    case "learning":
+      return <LearningView />;
     case "settings":
       return (
         <Suspense fallback={<div className="loading">…</div>}>
@@ -121,6 +136,32 @@ function useReminderEvents() {
   }, [t]);
 }
 
+/** A second page beside the main one (Phase D: split view). The same page is never open twice. */
+function SplitPane({ id }: { id: string }) {
+  const s = useStore();
+  const { t } = useI18n();
+  const meta = s.pageById(id);
+  const sameAsMain = s.route.name === "page" && s.route.id === id;
+  useEffect(() => {
+    if (sameAsMain || (s.ready && !meta)) s.openSplit(null);
+  }, [sameAsMain, meta, s]);
+  if (sameAsMain || !meta) return null;
+  return (
+    <section className="split-pane" aria-label={t("Split view")}>
+      <div className="split-head">
+        <span className="small-text muted" style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{meta.icon || kindIcon(meta.kind, meta.canvasKind)} {meta.title || t("Untitled")}</span>
+        <button className="btn small ghost" title={t("Open in the main pane")} onClick={() => {
+          const main = s.route;
+          s.navigate({ name: "page", id });
+          s.openSplit(main.name === "page" ? main.id : null);
+        }}>⇄ {t("Swap")}</button>
+        <button className="icon-btn small" aria-label={t("Close split view")} onClick={() => s.openSplit(null)}><Icon name="close" size={13} /></button>
+      </div>
+      <PageView key={id} id={id} />
+    </section>
+  );
+}
+
 function Shell() {
   const s = useStore();
   const { t } = useI18n();
@@ -142,11 +183,14 @@ function Shell() {
         <TopBar />
         <div className="content-row">
           <Routes />
+          {s.splitPageId && <SplitPane id={s.splitPageId} />}
         </div>
       </div>
       {s.paletteOpen && <CommandPalette />}
       {s.taskDialog && <TaskDialog key={s.taskDialog.id ?? "new"} id={s.taskDialog.id} defaults={s.taskDialog.defaults} onClose={s.closeTask} />}
       <MoveDialogHost />
+      <VersionHistoryHost />
+      <SiteExportHost />
       <DialogHost />
       <Toasts />
     </div>

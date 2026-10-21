@@ -131,7 +131,7 @@ fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key).and_then(|v| v.as_str()).ok_or_else(|| AppError::Invalid(format!("missing argument {key}")))
 }
 
-fn run_tool(ws: &Workspace, policy: &Policy, name: &str, args: &Value, client: &str) -> Result<Value> {
+pub fn run_tool(ws: &Workspace, policy: &Policy, name: &str, args: &Value, client: &str) -> Result<Value> {
     let conn = &ws.conn;
     match name {
         "search_workspace" => {
@@ -210,13 +210,7 @@ fn run_tool(ws: &Workspace, policy: &Policy, name: &str, args: &Value, client: &
                 .map(|r| {
                     let mut vals = serde_json::Map::new();
                     for p in &info.properties {
-                        let v = match p.ptype.as_str() {
-                            "title" => json!(r.title),
-                            "created_time" => json!(r.created_at),
-                            "last_edited_time" => json!(r.updated_at),
-                            _ => r.values.get(&p.id).cloned().unwrap_or(Value::Null),
-                        };
-                        vals.insert(p.name.clone(), json!(crate::domain::properties::display_value(&p.ptype, &p.config, &v)));
+                        vals.insert(p.name.clone(), json!(databases::record_display(p, r)));
                     }
                     json!({ "id": r.id, "values": vals })
                 })
@@ -325,6 +319,31 @@ fn run_tool(ws: &Workspace, policy: &Policy, name: &str, args: &Value, client: &
                 .map(|g| json!({ "id": g["id"], "title": g["title"], "health": g["metrics"]["health"]["state"] })).collect();
             Ok(json!({ "date": plan["date"], "tasks": out_tasks, "habits": habits_out, "goals": goals_out, "focusMinutesToday": plan["focusMinutesToday"] }))
         }
+        "get_timetable" => {
+            policy.require_domain("timetable")?;
+            let start = args.get("weekStart").and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| tasks::today(conn));
+            let w = crate::application::timetable::week(conn, &start)?;
+            let days: Vec<Value> = w["days"].as_array().into_iter().flatten().map(|d| json!({
+                "date": d["date"],
+                "blocks": d["blocks"].as_array().into_iter().flatten().map(|b| json!({ "title": b["title"], "kind": b["kind"], "start": b["startTime"], "end": b["endTime"], "location": b["location"], "goal": b["goalTitle"], "task": b["taskTitle"], "repeats": b["recurrence"] })).collect::<Vec<_>>(),
+            })).collect();
+            Ok(json!({ "weekStart": w["weekStart"], "days": days, "plannedMinutes": w["plannedMinutes"], "actualFocusMinutes": w["actualMinutes"] }))
+        }
+        "create_transaction_draft" => {
+            policy.require_domain("finance")?;
+            finance::draft_transaction(conn, args, &format!("mcp:{client}"))
+        }
+        "suggest_weekly_review" => {
+            policy.require_domain("goals")?;
+            let period = args.get("period").and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| reviews::current_week(conn));
+            let r = reviews::get(conn, &period)?;
+            Ok(json!({ "period": period, "summary": r["draft"], "saved": r["saved"], "note": "Summary generated from local data. Suggest reflections and next commitments; the user writes and saves the review." }))
+        }
+        "get_learning_plan" => {
+            policy.require_domain("skills")?;
+            let o = crate::application::learning::overview(conn)?;
+            Ok(json!({ "courses": o["courses"], "topics": o["topics"].as_array().into_iter().flatten().map(|t| json!({ "id": t["id"], "title": t["title"], "course": t["courseTitle"], "status": t["status"], "reviewDue": t["reviewDue"], "skill": t["skillName"], "errorCount": t["errorCount"] })).collect::<Vec<_>>(), "reviewsDue": o["reviewsDue"].as_array().map(|a| a.len()).unwrap_or(0) }))
+        }
         "get_habit_summary" => {
             policy.require_domain("habits")?;
             let out: Vec<Value> = habits::list(conn, false)?.into_iter()
@@ -343,8 +362,150 @@ fn run_tool(ws: &Workspace, policy: &Policy, name: &str, args: &Value, client: &
             policy.require_goal(id)?;
             goals::create_draft(conn, id, args, &format!("mcp:{client}"))
         }
+        // ---------- writes (off by default; same services as the UI; audited) ----------
+        "create_page" => {
+            let title = str_arg(args, "title")?;
+            let parent = args.get("parentId").and_then(|v| v.as_str());
+            let section = args.get("sectionId").and_then(|v| v.as_str());
+            match (parent, section) {
+                (Some(pid), _) => policy.require_write_page(conn, pid)?,
+                (None, Some(sid)) => policy.require_write_section(sid)?,
+                _ => return Err(AppError::Invalid("give parentId or sectionId".into())),
+            }
+            let p = pages::create(conn, pages::CreatePage { kind: "page".into(), title: title.into(), parent_id: parent.map(String::from), section_id: section.map(String::from), ..Default::default() })?;
+            if let Some(md) = args.get("markdown").and_then(|v| v.as_str()) {
+                pages::save_blocks_raw(conn, &p.id, &Value::Array(crate::infrastructure::markdown::to_blocks(md)))?;
+            }
+            Ok(json!({ "pageId": p.id, "title": p.title }))
+        }
+        "update_page" => {
+            let id = str_arg(args, "pageId")?;
+            policy.require_write_page(conn, id)?;
+            let meta = pages::get_meta(conn, id)?;
+            let mut blocks = pages::load_blocks(conn, id)?;
+            let before = blocks.len();
+            if let Some(md) = args.get("replaceMarkdown").and_then(|v| v.as_str()) {
+                blocks = crate::infrastructure::markdown::to_blocks(md);
+            }
+            if let Some(md) = args.get("appendMarkdown").and_then(|v| v.as_str()) {
+                blocks.extend(crate::infrastructure::markdown::to_blocks(md));
+            }
+            let new_title = args.get("title").and_then(|v| v.as_str());
+            let summary = json!({ "pageId": id, "title": { "from": meta.title, "to": new_title.unwrap_or(&meta.title) }, "blocks": { "from": before, "to": blocks.len() } });
+            if args.get("dryRun").and_then(|v| v.as_bool()) == Some(true) {
+                return Ok(json!({ "dryRun": true, "wouldChange": summary }));
+            }
+            crate::application::versions::snapshot(conn, id, &format!("mcp:{client}"))?;
+            if let Some(t) = new_title {
+                pages::update(conn, id, &json!({ "title": t }))?;
+            }
+            if args.get("replaceMarkdown").is_some() || args.get("appendMarkdown").is_some() {
+                pages::save_blocks_raw(conn, id, &Value::Array(blocks))?;
+            }
+            Ok(json!({ "changed": summary, "revision": "a revision of the previous content was saved" }))
+        }
+        "create_record" | "update_record" => {
+            let (db_id, record_id) = if name == "create_record" {
+                (str_arg(args, "databaseId")?.to_string(), None)
+            } else {
+                let rid = str_arg(args, "recordId")?;
+                (databases::database_of_record(conn, rid)?.ok_or_else(|| AppError::NotFound("record".into()))?, Some(rid.to_string()))
+            };
+            policy.require_write_page(conn, &db_id)?;
+            let info = databases::get(conn, &db_id)?;
+            let mut values = serde_json::Map::new();
+            for (k, v) in args.get("values").and_then(|v| v.as_object()).cloned().unwrap_or_default() {
+                let p = info.properties.iter().find(|p| p.name == k || p.id == k).ok_or_else(|| AppError::Invalid(format!("no property named “{k}”")))?;
+                values.insert(p.id.clone(), mcp_value(p, &v)?);
+            }
+            let title = args.get("title").and_then(|v| v.as_str());
+            if args.get("dryRun").and_then(|v| v.as_bool()) == Some(true) {
+                return Ok(json!({ "dryRun": true, "wouldSet": values, "title": title }));
+            }
+            let rec = match record_id {
+                None => databases::create_record(conn, &db_id, databases::CreateRecord { title: title.unwrap_or("").into(), values, ..Default::default() })?,
+                Some(rid) => {
+                    if let Some(t) = title {
+                        let tp = info.properties.iter().find(|p| p.ptype == "title").unwrap();
+                        databases::set_value(conn, &rid, &tp.id, &json!(t))?;
+                    }
+                    let mut last = databases::get_record(conn, &rid)?;
+                    for (pid, v) in &values {
+                        last = databases::set_value(conn, &rid, pid, v)?;
+                    }
+                    last
+                }
+            };
+            Ok(json!({ "recordId": rec.id, "title": rec.title }))
+        }
+        "create_task" => {
+            let project = args.get("projectId").and_then(|v| v.as_str());
+            policy.require_write_task(conn, project)?;
+            let t = tasks::create(conn, &json!({
+                "title": str_arg(args, "title")?, "description": args.get("description").cloned().unwrap_or(json!("")),
+                "dueDate": args.get("dueDate").cloned().unwrap_or(Value::Null), "priority": args.get("priority").cloned().unwrap_or(json!("none")),
+                "projectId": project,
+            }))?;
+            Ok(json!({ "taskId": t.id, "title": t.title }))
+        }
+        "update_task" => {
+            let id = str_arg(args, "taskId")?;
+            let t = tasks::get(conn, id)?;
+            policy.require_write_task(conn, t.project_id.as_deref())?;
+            let mut patch = serde_json::Map::new();
+            for k in ["title", "description", "status", "priority", "dueDate"] {
+                if let Some(v) = args.get(k) {
+                    patch.insert(k.into(), v.clone());
+                }
+            }
+            if args.get("dryRun").and_then(|v| v.as_bool()) == Some(true) {
+                return Ok(json!({ "dryRun": true, "taskId": id, "wouldSet": patch }));
+            }
+            let t = tasks::update(conn, id, &Value::Object(patch))?;
+            Ok(json!({ "taskId": t.id, "status": t.status, "dueDate": t.due_date }))
+        }
+        "log_focus_session" => {
+            policy.require_write_domain("goals")?;
+            let minutes = args.get("minutes").and_then(|v| v.as_i64()).filter(|m| (1..=720).contains(m)).ok_or_else(|| AppError::Invalid("minutes must be 1–720".into()))?;
+            let s = skills::start_session(conn, &json!({ "taskId": args.get("taskId"), "goalId": args.get("goalId") }))?;
+            let done = skills::stop_session(conn, s["id"].as_str().unwrap_or(""), &json!({ "actualMinutes": minutes, "note": args.get("note").cloned().unwrap_or(json!("")) }))?;
+            Ok(json!({ "sessionId": done["id"], "minutes": minutes }))
+        }
+        "log_habit" => {
+            policy.require_write_domain("habits")?;
+            let date = args.get("date").and_then(|v| v.as_str()).map(String::from).unwrap_or_else(|| tasks::today(conn));
+            let h = habits::log(conn, str_arg(args, "habitId")?, &date, Some(args.get("status").and_then(|v| v.as_str()).unwrap_or("done")), args.get("value").and_then(|v| v.as_f64()), "")?;
+            Ok(json!({ "habitId": h["id"], "stats": h["stats"] }))
+        }
+        "add_skill_evidence" => {
+            policy.require_write_domain("skills")?;
+            let mut ev = args.clone();
+            ev["reviewer"] = json!(format!("{} (via MCP)", args.get("reviewer").and_then(|v| v.as_str()).unwrap_or(client)));
+            let e = skills::add_evidence(conn, &ev)?;
+            Ok(json!({ "evidenceId": e["id"], "note": "Evidence recorded with provenance; it changes the skill level only if a rubric level was given." }))
+        }
         other => Err(AppError::Invalid(format!("unknown tool {other}"))),
     }
+}
+
+/// Human-friendly MCP value → stored value (option names → ids, "YYYY-MM-DD" → date object).
+fn mcp_value(p: &databases::PropertyInfo, v: &Value) -> Result<Value> {
+    let opt = |name: &str| -> Result<String> {
+        crate::domain::properties::options(&p.config)
+            .iter()
+            .find(|o| o["name"].as_str() == Some(name) || o["id"].as_str() == Some(name))
+            .and_then(|o| o["id"].as_str().map(String::from))
+            .ok_or_else(|| {
+                let names: Vec<String> = crate::domain::properties::options(&p.config).iter().filter_map(|o| o["name"].as_str().map(String::from)).collect();
+                AppError::Invalid(format!("“{name}” is not an option of {} (options: {})", p.name, names.join(", ")))
+            })
+    };
+    Ok(match (p.ptype.as_str(), v) {
+        ("select" | "status", Value::String(s)) => json!(opt(s)?),
+        ("multi_select", Value::Array(a)) => Value::Array(a.iter().filter_map(|x| x.as_str()).map(|x| opt(x).map(|id| json!(id))).collect::<Result<Vec<_>>>()?),
+        ("date", Value::String(s)) => json!({ "start": s }),
+        _ => v.clone(),
+    })
 }
 
 fn tool_definitions() -> Value {
@@ -430,6 +591,30 @@ fn tool_definitions() -> Value {
             "annotations": ro
         },
         {
+            "name": "get_timetable",
+            "description": "The user's weekly timetable (planned time blocks per day and time) with planned vs actual focus minutes. Requires the timetable to be shared.",
+            "inputSchema": { "type": "object", "properties": { "weekStart": { "type": "string", "description": "any date in the week, YYYY-MM-DD" } } },
+            "annotations": ro
+        },
+        {
+            "name": "create_transaction_draft",
+            "description": "Sensitive: propose an income/expense entry. It is saved only as a draft that the user confirms (and assigns to an account) in Finance. Requires finance sharing.",
+            "inputSchema": { "type": "object", "properties": { "type": { "type": "string", "enum": ["income","expense"] }, "amount": { "type": "string", "description": "e.g. 1250.50" }, "occurredOn": { "type": "string" }, "merchantOrSource": { "type": "string" }, "note": { "type": "string" } }, "required": ["type", "amount"] },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false }
+        },
+        {
+            "name": "suggest_weekly_review",
+            "description": "The locally generated weekly review summary (tasks done/slipped, milestones, evidence, habits, focus vs plan, spending) for drafting reflections. Read-only.",
+            "inputSchema": { "type": "object", "properties": { "period": { "type": "string", "description": "ISO week like 2026-W43" } } },
+            "annotations": ro
+        },
+        {
+            "name": "get_learning_plan",
+            "description": "Courses, topics (status, prerequisites, next review date) and reviews due.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": ro
+        },
+        {
             "name": "get_habit_summary",
             "description": "Habits with schedule, streak and 7-day consistency (requires habits to be shared).",
             "inputSchema": { "type": "object", "properties": {} },
@@ -459,6 +644,64 @@ fn tool_definitions() -> Value {
                 }, "required": ["title"] } }
             }, "required": ["goalId", "requirements"] },
             "annotations": { "readOnlyHint": false, "destructiveHint": false, "idempotentHint": false, "openWorldHint": false }
+        },
+        {
+            "name": "create_page",
+            "description": "Create a page from Markdown under a parent page or in a section the user opened for writes.",
+            "inputSchema": { "type": "object", "properties": { "title": { "type": "string" }, "parentId": { "type": "string" }, "sectionId": { "type": "string" }, "markdown": { "type": "string" } }, "required": ["title"] },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false }
+        },
+        {
+            "name": "update_page",
+            "description": "Rename a page and/or append or replace its content with Markdown. A revision of the previous content is saved first. Use dryRun to preview.",
+            "inputSchema": { "type": "object", "properties": { "pageId": { "type": "string" }, "title": { "type": "string" }, "appendMarkdown": { "type": "string" }, "replaceMarkdown": { "type": "string" }, "dryRun": { "type": "boolean" } }, "required": ["pageId"] },
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "openWorldHint": false }
+        },
+        {
+            "name": "create_record",
+            "description": "Add a record to a database. values maps property names to values (select/status: option name; multi-select: list of names; date: YYYY-MM-DD).",
+            "inputSchema": { "type": "object", "properties": { "databaseId": { "type": "string" }, "title": { "type": "string" }, "values": { "type": "object" }, "dryRun": { "type": "boolean" } }, "required": ["databaseId", "title"] },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false }
+        },
+        {
+            "name": "update_record",
+            "description": "Change a database record's title or property values (by property name). Use dryRun to preview.",
+            "inputSchema": { "type": "object", "properties": { "recordId": { "type": "string" }, "title": { "type": "string" }, "values": { "type": "object" }, "dryRun": { "type": "boolean" } }, "required": ["recordId"] },
+            "annotations": { "readOnlyHint": false, "destructiveHint": true, "openWorldHint": false }
+        },
+        {
+            "name": "create_task",
+            "description": "Create a task (optionally in a project open for writes).",
+            "inputSchema": { "type": "object", "properties": { "title": { "type": "string" }, "description": { "type": "string" }, "dueDate": { "type": "string" }, "priority": { "type": "string", "enum": ["none","low","medium","high","urgent"] }, "projectId": { "type": "string" } }, "required": ["title"] },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false }
+        },
+        {
+            "name": "update_task",
+            "description": "Change a task's status, due date, priority, title or description. Use dryRun to preview.",
+            "inputSchema": { "type": "object", "properties": { "taskId": { "type": "string" }, "status": { "type": "string", "enum": ["todo","in_progress","done"] }, "dueDate": { "type": "string" }, "priority": { "type": "string" }, "title": { "type": "string" }, "description": { "type": "string" }, "dryRun": { "type": "boolean" } }, "required": ["taskId"] },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false }
+        },
+        {
+            "name": "log_focus_session",
+            "description": "Record a completed focus/study session of N minutes for a task or goal (requires goal writes).",
+            "inputSchema": { "type": "object", "properties": { "minutes": { "type": "integer" }, "taskId": { "type": "string" }, "goalId": { "type": "string" }, "note": { "type": "string" } }, "required": ["minutes"] },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false }
+        },
+        {
+            "name": "log_habit",
+            "description": "Mark a habit done / skipped / missed for a date (default today).",
+            "inputSchema": { "type": "object", "properties": { "habitId": { "type": "string" }, "date": { "type": "string" }, "status": { "type": "string", "enum": ["done","skipped","missed"] }, "value": { "type": "number" } }, "required": ["habitId"] },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false }
+        },
+        {
+            "name": "add_skill_evidence",
+            "description": "Attach evidence (mock test, review, project…) to a skill with provenance. Only a rubric level changes the skill level; do not invent levels.",
+            "inputSchema": { "type": "object", "properties": {
+                "skillId": { "type": "string" }, "evidenceType": { "type": "string", "enum": ["assessment","mock_test","artifact","code_review","project","certificate","self_review"] },
+                "title": { "type": "string" }, "level": { "type": "integer", "minimum": 0, "maximum": 5 }, "score": { "type": "number" }, "maxScore": { "type": "number" },
+                "observedAt": { "type": "string" }, "taskId": { "type": "string" }, "requirementId": { "type": "string" }, "sourceUrl": { "type": "string" }, "notes": { "type": "string" }
+            }, "required": ["skillId", "evidenceType", "title"] },
+            "annotations": { "readOnlyHint": false, "destructiveHint": false, "openWorldHint": false }
         }
     ])
 }

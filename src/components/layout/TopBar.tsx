@@ -22,6 +22,9 @@ const routeTitles: Record<string, string> = {
   habits: "Habits & routines",
   finance: "Personal finance",
   review: "Weekly review",
+  form: "Form",
+  automations: "Automations",
+  timetable: "Timetable",
 };
 
 export function TopBar() {

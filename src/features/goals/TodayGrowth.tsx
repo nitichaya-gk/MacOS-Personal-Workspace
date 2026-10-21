@@ -6,6 +6,7 @@ import type { FocusSession, Goal, Habit, MonthSummary, Task } from "../../shared
 import { HabitRow } from "../habits/HabitsView";
 import { useShield } from "../finance/FinanceView";
 import { Bar, HealthBadge } from "./ui";
+import { TodaySchedule, type Block } from "../timetable/TimetableView";
 
 /** Start/stop focus timer. The running session is stored in the database, so it survives restarts. */
 export function FocusTimer({ tasks, onStopped }: { tasks: Task[]; onStopped?: () => void }) {
@@ -78,7 +79,7 @@ export function GoalPulse({ goals }: { goals: Goal[] }) {
 export function TodayGrowth() {
   const s = useStore();
   const { t, locale } = useI18n();
-  const [plan, setPlan] = useState<{ goals: Goal[]; habits: Habit[]; tasks: Task[] } | null>(null);
+  const [plan, setPlan] = useState<{ goals: Goal[]; habits: Habit[]; tasks: Task[]; schedule?: unknown[] } | null>(null);
   const [month, setMonth] = useState<MonthSummary | null>(null);
   const [hidden, toggle] = useShield();
   const [budgetOpen, setBudgetOpen] = useState(false);
@@ -93,6 +94,8 @@ export function TodayGrowth() {
   if (!plan) return null;
   return (
     <>
+      <div className="h-section"><span>📅 {t("Today's schedule")}</span><span className="spacer" /><button className="btn small ghost" onClick={() => s.navigate({ name: "timetable" })}>{t("Timetable")} →</button></div>
+      <TodaySchedule blocks={(plan.schedule ?? []) as Block[]} onChanged={load} />
       <div className="h-section"><span>🎯 {t("Goal pulse")}</span><span className="spacer" /><button className="btn small ghost" onClick={() => s.navigate({ name: "goals" })}>{t("All goals")} →</button></div>
       <GoalPulse goals={plan.goals} />
       <div style={{ marginTop: 12 }}><FocusTimer tasks={plan.tasks} onStopped={load} /></div>

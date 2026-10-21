@@ -116,8 +116,52 @@ export function GoalsView({ domain: initialDomain }: { domain?: string }) {
             })}
           </div>
         )}
+        {goals && goals.length > 0 && <LooseEnds />}
       </div>
       {creating && <GoalForm onClose={() => setCreating(false)} onCreated={(g) => (setCreating(false), s.navigate({ name: "goal", id: g.id }))} />}
     </div>
+  );
+}
+
+type Orphans = Awaited<ReturnType<typeof growth.orphans>>;
+
+/** Rules-based check for work that is not connected to anything (PRD: orphan detection). */
+function LooseEnds() {
+  const s = useStore();
+  const { t } = useI18n();
+  const [data, setData] = useState<Orphans | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  useEffect(() => {
+    growth.orphans().then(setData).catch(s.fail);
+  }, [s.fail, s.taskDialog]);
+  if (!data) return null;
+  const rows: { key: keyof Orphans; label: string; hint: string; go: (id: string) => void }[] = [
+    { key: "goalsWithoutSuccessDefinition", label: "Active goals without a success definition", hint: "Write how you will know it is achieved.", go: (id) => s.navigate({ name: "goal", id }) },
+    { key: "goalsWithoutRequirements", label: "Goals without requirements", hint: "Break the goal into the criteria it needs.", go: (id) => s.navigate({ name: "goal", id, tab: "requirements" }) },
+    { key: "requirementsWithoutWork", label: "Unmet requirements with no task or milestone", hint: "Nothing is planned for these yet.", go: (id) => s.navigate({ name: "goal", id, tab: "roadmap" }) },
+    { key: "tasksWithoutGoalOrProject", label: "Open tasks not linked to a goal or project", hint: "Fine for chores — link the ones that serve a goal.", go: (id) => s.openTask(id) },
+    { key: "skillsWithoutEvidence", label: "Skills without any evidence", hint: "Add a test, review or project to assess the level.", go: (id) => s.navigate({ name: "skills", id }) },
+  ];
+  const total = rows.reduce((n, r) => n + data[r.key].length, 0);
+  return (
+    <section className="card-box" style={{ marginTop: 24 }}>
+      <h3>🧩 {t("Loose ends")} · {total}</h3>
+      <p className="desc">{total ? t("Items that are not connected to the rest of your plan. Nothing is wrong with them — this is a prompt to link or tidy.") : t("Everything is connected. Nice.")}</p>
+      {rows.filter((r) => data[r.key].length).map((r) => (
+        <div key={r.key} style={{ borderTop: "1px solid var(--border)", padding: "6px 0" }}>
+          <button className="row small-text" style={{ width: "100%", background: "none", border: 0, padding: 0, color: "inherit", textAlign: "left" }} aria-expanded={open === r.key} onClick={() => setOpen(open === r.key ? null : r.key)}>
+            <span style={{ width: 14 }}>{open === r.key ? "▾" : "▸"}</span>
+            <span style={{ flex: 1 }}>{t(r.label)}</span>
+            <strong>{data[r.key].length}</strong>
+          </button>
+          {open === r.key && (
+            <div style={{ paddingLeft: 20, marginTop: 4 }}>
+              <div className="small-text faint" style={{ marginBottom: 4 }}>{t(r.hint)}</div>
+              {data[r.key].map((x, i) => <div key={i}><button className="crumb small-text" onClick={() => r.go(x.id)}>{x.title || t("Untitled")}</button></div>)}
+            </div>
+          )}
+        </div>
+      ))}
+    </section>
   );
 }

@@ -266,6 +266,11 @@ export function TaskDialog({ id, defaults, onClose }: { id?: string; defaults?: 
             📄 {t("Open source page")}
           </button>
         )}
+        {task?.sourceCanvasId && (
+          <button type="button" className="btn small ghost" onClick={() => (onClose(), s.navigate({ name: "page", id: task.sourceCanvasId!, tab: task.sourceElementId ? `el:${task.sourceElementId}` : undefined }))}>
+            🎨 {t("Open on canvas")}
+          </button>
+        )}
       </form>
     </Modal>
   );

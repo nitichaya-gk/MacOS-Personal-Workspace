@@ -9,6 +9,9 @@ import type { PageMeta } from "../../shared/types";
 import { blobToBase64, debounce, fileSafeName } from "../../shared/utils";
 import { kindIcon } from "../../components/ui/Icon";
 import { DIAGRAM_SHAPES, FRAMES, UI_KIT, type KitItem, type Skeleton } from "../wireframes/components";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { fromDrawio, toDrawio } from "./interchange";
+import { FRAME_LINK, PrototypePlayer } from "./Prototype";
 
 type Ex = typeof ExcalidrawModule;
 // Excalidraw's element/appState types are deep; this module treats them structurally.
@@ -22,7 +25,33 @@ export const loadExcalidraw = () => (exModule ??= import("@excalidraw/excalidraw
 
 const SAVED_APP_STATE = ["viewBackgroundColor", "gridModeEnabled", "gridSize", "gridStep", "objectsSnapModeEnabled", "scrollX", "scrollY", "zoom", "currentItemRoughness", "currentItemFontFamily"];
 
-export function CanvasView({ page }: { page: PageMeta }) {
+/**
+ * Canvases written outside the editor (MCP clients, imports, older files) may hold skeleton-style
+ * elements without Excalidraw's required fields; Excalidraw crashes restoring those, so they are
+ * completed through its skeleton converter first. Ids are kept so links and tasks still resolve.
+ */
+async function completeElements(elements: El[]): Promise<El[]> {
+  const partial = elements.filter((e) => typeof e.version !== "number");
+  if (!partial.length) return elements;
+  const ex = await loadExcalidraw();
+  const labels = new Map(partial.filter((e) => e.type === "text" && e.containerId).map((e) => [e.containerId, e.text ?? e.originalText ?? ""]));
+  const skeletons = partial
+    .filter((e) => !(e.type === "text" && e.containerId && partial.some((c) => c.id === e.containerId)))
+    .map(({ startBinding, endBinding, boundElements: _b, ...e }: El) => ({
+      ...e,
+      ...(labels.has(e.id) ? { label: { text: labels.get(e.id) } } : {}),
+      ...(startBinding?.elementId ? { start: { id: startBinding.elementId } } : {}),
+      ...(endBinding?.elementId ? { end: { id: endBinding.elementId } } : {}),
+    }));
+  try {
+    return [...elements.filter((e) => typeof e.version === "number"), ...ex.convertToExcalidrawElements(skeletons as any, { regenerateIds: false })];
+  } catch {
+    // Better an incomplete drawing than a crash: drop what cannot be repaired.
+    return elements.filter((e) => typeof e.version === "number");
+  }
+}
+
+export function CanvasView({ page, focusElement }: { page: PageMeta; focusElement?: string }) {
   const s = useStore();
   const { t, lang } = useI18n();
   const scheme = useColorScheme();
@@ -30,20 +59,34 @@ export function CanvasView({ page }: { page: PageMeta }) {
   const [error, setError] = useState<string | null>(null);
   const [exApi, setExApi] = useState<Api>(null);
   const [selected, setSelected] = useState<El[]>([]);
+  const [playing, setPlaying] = useState(false);
   const kind = page.canvasKind ?? "diagram";
   const lastVersion = useRef<number>(-1);
   const savedFiles = useRef<Set<string>>(new Set());
   const sRef = useRef(s);
   sRef.current = s;
 
+  // Opened from a task ("Open on canvas"): select and zoom to the element the task came from.
+  useEffect(() => {
+    if (!exApi || !focusElement) return;
+    const id = setTimeout(() => {
+      const target = exApi.getSceneElements().find((x: El) => x.id === focusElement);
+      if (!target) return sRef.current.toast(t("That object is no longer on this canvas."));
+      exApi.updateScene({ appState: { selectedElementIds: { [target.id]: true } } });
+      exApi.scrollToContent(target, { fitToContent: true, animate: true });
+    }, 150);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [exApi, focusElement]);
+
   useEffect(() => {
     api.canvases
       .load(page.id)
-      .then((c) => {
+      .then(async (c) => {
         c.files.forEach((f) => savedFiles.current.add(f.id));
         const wire = c.kind === "wireframe";
         setInitial({
-          elements: c.elements,
+          elements: await completeElements(c.elements),
           appState: {
             currentItemRoughness: wire ? 0 : 1,
             currentItemFontFamily: wire ? 2 : 5,
@@ -138,6 +181,41 @@ export function CanvasView({ page }: { page: PageMeta }) {
     }
   };
 
+  const importFile = async () => {
+    if (!exApi) return;
+    const path = await openDialog({ multiple: false, filters: [{ name: "Diagram", extensions: ["excalidraw", "drawio", "xml", "json"] }] });
+    if (typeof path !== "string") return;
+    try {
+      const ex = await loadExcalidraw();
+      const { text } = await api.exports.readText(path);
+      let added: El[] = [];
+      let skipped = 0;
+      if (/\.excalidraw$|\.json$/i.test(path)) {
+        const data = await ex.loadFromBlob(new Blob([text], { type: "application/json" }), null, null);
+        added = data.elements as El[];
+        const files = Object.values(data.files ?? {});
+        if (files.length) exApi.addFiles(files);
+      } else {
+        const r = await fromDrawio(text);
+        skipped = r.skipped;
+        added = ex.convertToExcalidrawElements(r.skeletons as any);
+      }
+      exApi.updateScene({ elements: [...exApi.getSceneElementsIncludingDeleted(), ...added], captureUpdate: ex.CaptureUpdateAction.IMMEDIATELY });
+      exApi.scrollToContent(added, { fitToContent: true });
+      s.toast(skipped ? t("Imported {n} objects; {s} unsupported shapes became rectangles or were skipped.", { n: added.length, s: skipped }) : t("Imported {n} objects", { n: added.length }), { kind: skipped ? "info" : "success" });
+    } catch (e) {
+      s.fail(e);
+    }
+  };
+  const exportDrawio = async () => {
+    if (!exApi) return;
+    const { xml, skipped } = toDrawio(exApi.getSceneElements(), page.title);
+    const dest = await save({ defaultPath: `${fileSafeName(page.title)}.drawio`, filters: [{ name: "draw.io", extensions: ["drawio"] }] });
+    if (!dest) return;
+    await api.exports.writeText(dest, xml).catch(s.fail);
+    s.toast(skipped ? t("Exported; {s} objects (images, freehand) are not supported by the draw.io export.", { s: skipped }) : t("Exported"), { kind: "success" });
+  };
+
   if (error) return <div className="error-box">{t("This canvas could not be opened.")} <span className="mono">{error}</span></div>;
   if (!initial) return <div className="loading">{t("Loading…")}</div>;
 
@@ -159,7 +237,11 @@ export function CanvasView({ page }: { page: PageMeta }) {
             ))}
           </div>
         ))}
+        {kind === "wireframe" && <button className="btn small primary" style={{ margin: "8px 4px", width: "calc(100% - 8px)" }} onClick={() => setPlaying(true)} disabled={!exApi}>▶ {t("Play prototype")}</button>}
+        <h5>{t("Import")}</h5>
+        <button className="menu-item" onClick={importFile}>⬇️ .excalidraw / .drawio…</button>
         <h5>{t("Export")}</h5>
+        <button className="menu-item" onClick={exportDrawio}>🔷 draw.io (.drawio)</button>
         <button className="menu-item" onClick={() => exportAs("png", false)}>🖼 PNG</button>
         <button className="menu-item" onClick={() => exportAs("svg", false)}>✒️ SVG</button>
         <button className="menu-item" onClick={() => exportAs("json", false)}>{"{ }"} JSON (.excalidraw)</button>
@@ -179,7 +261,14 @@ export function CanvasView({ page }: { page: PageMeta }) {
             onChange={onChange as any}
             onLinkOpen={(el: El, ev: any) => {
               const link: string = el.link ?? "";
-              if (link.startsWith("workspace://")) {
+              if (link.startsWith(FRAME_LINK) && exApi) {
+                ev.preventDefault();
+                const target = exApi.getSceneElements().find((x: El) => x.id === link.slice(FRAME_LINK.length));
+                if (target) exApi.scrollToContent(target, { fitToContent: true, animate: true });
+              } else if (link.startsWith("workspace://task/")) {
+                ev.preventDefault();
+                s.openTask(link.slice("workspace://task/".length));
+              } else if (link.startsWith("workspace://")) {
                 ev.preventDefault();
                 const id = link.split("/").pop();
                 if (id) s.navigate({ name: "page", id });
@@ -192,13 +281,14 @@ export function CanvasView({ page }: { page: PageMeta }) {
           />
         </Suspense>
       </div>
-      {selected.length > 0 && exApi && <CanvasInspector api={exApi} selected={selected} />}
+      {selected.length > 0 && exApi && <CanvasInspector api={exApi} selected={selected} wireframe={kind === "wireframe"} canvasId={page.id} />}
+      {playing && exApi && <PrototypePlayer api={exApi} onClose={() => setPlaying(false)} />}
     </div>
   );
 }
 
 /** Geometry, label and workspace link of the selected object(s). Styling stays in Excalidraw's own panel. */
-function CanvasInspector({ api: exApi, selected }: { api: Api; selected: El[] }) {
+function CanvasInspector({ api: exApi, selected, wireframe, canvasId }: { api: Api; selected: El[]; wireframe?: boolean; canvasId: string }) {
   const { t } = useI18n();
   const s = useStore();
   const [q, setQ] = useState("");
@@ -225,6 +315,38 @@ function CanvasInspector({ api: exApi, selected }: { api: Api; selected: El[] })
   const pages = s.tree.filter((p) => p.title.toLowerCase().includes(q.trim().toLowerCase())).slice(0, 6);
   const linkId = typeof el.link === "string" && el.link.startsWith("workspace://") ? el.link.split("/").pop() : null;
   const linked = linkId ? s.pageById(linkId) : undefined;
+  const taskId = typeof el.link === "string" && el.link.startsWith("workspace://task/") ? el.link.slice("workspace://task/".length) : null;
+
+  /** One task per selected object that has text (sticky notes, labelled shapes); the object links back to its task. */
+  const createTasks = async () => {
+    const textOf = (e: El) => {
+      if (e.type === "text") return e.originalText ?? e.text;
+      const b = e.boundElements?.find((x: El) => x.type === "text");
+      const te = b && all.find((x) => x.id === b.id);
+      return te ? te.originalText ?? te.text : "";
+    };
+    const sources = selected.filter((e) => !e.containerId && !e.isDeleted);
+    const withText = sources.map((e) => ({ e, title: String(textOf(e) ?? "").replace(/\s+/g, " ").trim() })).filter((x) => x.title);
+    let jobs = withText;
+    if (!jobs.length) {
+      const title = await s.prompt({ title: t("New task from canvas"), placeholder: t("Task title") });
+      if (!title?.trim()) return;
+      jobs = [{ e: el, title }];
+    }
+    try {
+      const made: [string, string][] = [];
+      for (const j of jobs) {
+        const task = await api.tasks.create({ title: j.title.slice(0, 200), sourceCanvasId: canvasId, sourceElementId: j.e.id });
+        made.push([j.e.id, task.id]);
+      }
+      const map = new Map(made);
+      await update([...map.keys()], (e) => ({ link: `workspace://task/${map.get(e.id)}` }));
+      await s.refreshCounts();
+      s.toast(made.length === 1 ? t("Task created") : t("{n} tasks created", { n: made.length }), made.length === 1 ? { action: { label: t("Open"), run: () => s.openTask(made[0][1]) } } : undefined);
+    } catch (e) {
+      s.fail(e);
+    }
+  };
 
   return (
     <aside className="canvas-inspector" aria-label={t("Inspector")}>
@@ -258,6 +380,27 @@ function CanvasInspector({ api: exApi, selected }: { api: Api; selected: El[] })
               </button>
             ))}
           </>
+        )}
+      </div>
+      {wireframe && (() => {
+        const frames = all.filter((x: El) => x.type === "frame" && !x.isDeleted && x.id !== el.frameId);
+        const cur = typeof el.link === "string" && el.link.startsWith(FRAME_LINK) ? el.link.slice(FRAME_LINK.length) : "";
+        return (
+          <div className="field">
+            <span className="field-label">{t("Prototype: on click go to")}</span>
+            <select className="select" value={cur} onChange={(e) => update([el.id], () => ({ link: e.target.value ? FRAME_LINK + e.target.value : null }))}>
+              <option value="">—</option>
+              {frames.map((f: El) => <option key={f.id} value={f.id}>{f.name ?? t("Frame")}</option>)}
+            </select>
+          </div>
+        );
+      })()}
+      <div className="field">
+        <span className="field-label">{t("Task")}</span>
+        {taskId && selected.length === 1 ? (
+          <button className="btn small" onClick={() => s.openTask(taskId)}>✅ {t("Open linked task")}</button>
+        ) : (
+          <button className="btn small" onClick={createTasks}>✅ {selected.length > 1 ? t("Create tasks from selection") : t("Create task from this")}</button>
         )}
       </div>
       <div className="row wrap">

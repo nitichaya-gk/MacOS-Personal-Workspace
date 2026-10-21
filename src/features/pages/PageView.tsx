@@ -13,8 +13,9 @@ import { RecordProperties } from "../databases/RecordProperties";
 import { CanvasView } from "../diagrams/CanvasView";
 import { ProjectView } from "../projects/ProjectView";
 import { TaskRow } from "../tasks/TaskRow";
+import { CommentsPanel } from "./history";
 
-export function PageView({ id }: { id: string }) {
+export function PageView({ id, viewId }: { id: string; viewId?: string }) {
   const s = useStore();
   const { t } = useI18n();
   const [detail, setDetail] = useState<PageDetail | null>(null);
@@ -43,7 +44,7 @@ export function PageView({ id }: { id: string }) {
   if (!detail) return <div className="content"><div className="loading">{t("Loading…")}</div></div>;
 
   const meta = detail.meta;
-  if (meta.kind === "canvas") return <div className="content"><CanvasView page={meta} /></div>;
+  if (meta.kind === "canvas") return <div className="content"><CanvasView page={meta} focusElement={viewId?.startsWith("el:") ? viewId.slice(3) : undefined} /></div>;
 
   const section = s.sections.find((x) => x.id === meta.sectionId);
   const banners = (
@@ -89,7 +90,7 @@ export function PageView({ id }: { id: string }) {
         <div className="page full">
           {banners}
           <PageHeader meta={meta} onChange={(m) => setDetail({ ...detail, meta: m })} compact />
-          <DatabaseView id={meta.id} />
+          <DatabaseView id={meta.id} viewId={viewId} />
         </div>
       </div>
     );
@@ -246,6 +247,8 @@ function PageInspector({ meta }: { meta: PageMeta }) {
         <button className="icon-btn small" aria-label={t("New task")} onClick={() => s.openTask(undefined, meta.kind === "project" ? { projectId: meta.id } : { sourcePageId: meta.id })}><Icon name="plus" size={13} /></button>
       </h4>
       {tasks.length ? tasks.map((x) => <TaskRow key={x.id} task={x} compact onChanged={reload} />) : <div className="faint small-text">{t("No tasks linked to this page")}</div>}
+      <h4>{t("Comments")}</h4>
+      <CommentsPanel pageId={meta.id} />
       <h4>{t("Backlinks")}</h4>
       {backlinks.length ? (
         backlinks.map((l) => (

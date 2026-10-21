@@ -1,4 +1,4 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useStore } from "../../app/providers/store";
 import { useI18n } from "../../app/providers/i18n";
 import { api } from "../../services/desktop-bridge/api";
@@ -6,6 +6,7 @@ import type { DatabaseInfo, DbRecord, Property, PropertyType, SelectOption } fro
 import { formatDate, formatDateTime } from "../../shared/utils";
 import { Popover, Menu, useAnchor, type Anchor, type MenuEntry } from "../../components/ui/Popover";
 import { Icon } from "../../components/ui/Icon";
+import { Modal } from "../../components/ui/Modal";
 
 export const PROPERTY_TYPES: { type: PropertyType; label: string; icon: string }[] = [
   { type: "text", label: "Text", icon: "≡" },
@@ -20,6 +21,9 @@ export const PROPERTY_TYPES: { type: PropertyType; label: string; icon: string }
   { type: "files", label: "Files & media", icon: "📎" },
   { type: "created_time", label: "Created time", icon: "🕒" },
   { type: "last_edited_time", label: "Last edited time", icon: "🕓" },
+  { type: "relation", label: "Relation", icon: "↗" },
+  { type: "formula", label: "Formula", icon: "ƒ" },
+  { type: "rollup", label: "Rollup", icon: "Σ" },
 ];
 
 export const typeIcon = (t: PropertyType) => (t === "title" ? "Aa" : PROPERTY_TYPES.find((p) => p.type === t)?.icon ?? "≡");
@@ -48,7 +52,20 @@ export function PropertyValue({ p, rec }: { p: Property; rec: DbRecord }) {
   const { locale } = useI18n();
   const v = valueOf(rec, p);
   if (v === null || v === undefined || v === "") return null;
+  if (typeof v === "object" && v && "error" in (v as object)) {
+    return <span className="chip c-red" title={String((v as { error: string }).error)}>⚠ {String((v as { error: string }).error).slice(0, 40)}</span>;
+  }
   switch (p.type) {
+    case "relation":
+      return <>{(v as string[]).map((id) => rec.relationTitles?.[id] !== undefined && <RelationChip key={id} id={id} title={rec.relationTitles[id]} />)}</>;
+    case "formula":
+    case "rollup": {
+      if (typeof v === "number") return <span style={{ marginLeft: "auto" }}>{Number.isInteger(v) ? v.toLocaleString(locale) : v.toLocaleString(locale, { maximumFractionDigits: 4 })}</span>;
+      if (typeof v === "boolean") return <span>{v ? "☑" : "☐"}</span>;
+      if (Array.isArray(v)) return <span>{v.map((x) => (typeof x === "object" && x && "start" in x ? (x as { start: string }).start : String(x))).join(", ")}</span>;
+      if (typeof v === "object" && v && "start" in v) return <span>{formatDate((v as { start: string }).start, locale)}</span>;
+      return <span>{String(v)}</span>;
+    }
     case "select":
     case "status":
       return <OptionChip option={optionOf(p, v)} />;
@@ -78,13 +95,21 @@ export function PropertyValue({ p, rec }: { p: Property; rec: DbRecord }) {
   }
 }
 
+function RelationChip({ id, title }: { id: string; title: string }) {
+  const s = useStore();
+  return (
+    <span className="chip" role="link" style={{ cursor: "default", textDecoration: "underline", textDecorationColor: "var(--border-strong)" }}
+      onClick={(e) => (e.stopPropagation(), s.navigate({ name: "page", id }))}>↗ {title || "Untitled"}</span>
+  );
+}
+
 /** Editable cell: click opens the right editor for the property type. */
 export function PropertyCell({ db, p, rec, onSaved, children, className }: { db: DatabaseInfo; p: Property; rec: DbRecord; onSaved: (r: DbRecord) => void; children?: ReactNode; className?: string }) {
   const s = useStore();
   const { t } = useI18n();
   const pop = useAnchor();
   const ref = useRef<HTMLDivElement>(null);
-  const computed = p.type === "created_time" || p.type === "last_edited_time";
+  const computed = ["created_time", "last_edited_time", "formula", "rollup"].includes(p.type);
   const set = (value: unknown) => api.databases.setValue(rec.id, p.id, value).then(onSaved).catch(s.fail);
 
   if (p.type === "checkbox")
@@ -195,6 +220,8 @@ function ValueEditor({ db, p, rec, onCommit, onLiveCommit, close, t }: {
     );
   }
 
+  if (p.type === "relation") return <RelationEditor p={p} rec={rec} onCommit={onLiveCommit} t={t} />;
+
   if (p.type === "date") {
     const d = (v as { start: string; end?: string } | null) ?? null;
     return <DateEditor value={d} onCommit={onCommit} t={t} />;
@@ -228,6 +255,41 @@ function ValueEditor({ db, p, rec, onCommit, onLiveCommit, close, t }: {
   return <div className="muted small-text" style={{ padding: 6 }} onClick={close}>{t("This value is set automatically.")}</div>;
 }
 
+function RelationEditor({ p, rec, onCommit, t }: { p: Property; rec: DbRecord; onCommit: (v: unknown) => Promise<unknown>; t: (s: string) => string }) {
+  const s = useStore();
+  const target = (p.config.databaseId as string) || "";
+  const [q, setQ] = useState("");
+  const [found, setFound] = useState<DbRecord[]>([]);
+  const [selected, setSelected] = useState<string[]>((rec.values[p.id] as string[]) ?? []);
+  const [titles, setTitles] = useState<Record<string, string>>(rec.relationTitles ?? {});
+  useEffect(() => {
+    if (!target) return;
+    api.databases.query(target, { search: q || undefined, limit: 30 }).then((r) => setFound(r.records)).catch(s.fail);
+  }, [q, target, s.fail]);
+  if (!target) return <div className="small-text muted" style={{ padding: 6 }}>{t("Choose the related database in the column menu first.")}</div>;
+  const toggle = (r: DbRecord) => {
+    const next = selected.includes(r.id) ? selected.filter((x) => x !== r.id) : [...selected, r.id];
+    setSelected(next);
+    setTitles({ ...titles, [r.id]: r.title });
+    onCommit(next.length ? next : null);
+  };
+  return (
+    <div>
+      <div className="row wrap" style={{ gap: 4, marginBottom: 6 }}>
+        {selected.map((id) => <span key={id} className="chip">↗ {titles[id] ?? "…"}<button onClick={() => toggle({ id } as DbRecord)}>×</button></span>)}
+      </div>
+      <input className="input" autoFocus placeholder={t("Search records")} value={q} onChange={(e) => setQ(e.target.value)} />
+      <div style={{ marginTop: 4, maxHeight: 240, overflowY: "auto" }}>
+        {found.map((r) => (
+          <button key={r.id} className="menu-item" onClick={() => toggle(r)} aria-pressed={selected.includes(r.id)}>
+            <span style={{ width: 14 }}>{selected.includes(r.id) ? "✓" : ""}</span>{r.title || t("Untitled")}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function DateEditor({ value, onCommit, t }: { value: { start: string; end?: string } | null; onCommit: (v: unknown) => void; t: (s: string) => string }) {
   const [start, setStart] = useState(value?.start?.slice(0, 10) ?? "");
   const [end, setEnd] = useState(value?.end?.slice(0, 10) ?? "");
@@ -259,12 +321,13 @@ function DateEditor({ value, onCommit, t }: { value: { start: string; end?: stri
 }
 
 /** Column header menu: rename, change type (with data-loss preview), options, sort, hide, delete. */
-export function usePropertyMenu(reload: () => void, view?: { sortBy: (pid: string, dir: "asc" | "desc") => void; hide: (pid: string) => void; filterBy: (pid: string) => void }) {
+export function usePropertyMenu(db: DatabaseInfo | null, reload: () => void, view?: { sortBy: (pid: string, dir: "asc" | "desc") => void; hide: (pid: string) => void; filterBy: (pid: string) => void }) {
   const s = useStore();
   const { t } = useI18n();
   const menu = useAnchor();
   const [items, setItems] = useState<MenuEntry[]>([]);
   const [optionsFor, setOptionsFor] = useState<{ p: Property; anchor: Anchor } | null>(null);
+  const [configFor, setConfigFor] = useState<Property | null>(null);
 
   const changeType = async (p: Property, type: PropertyType) => {
     try {
@@ -296,6 +359,9 @@ export function usePropertyMenu(reload: () => void, view?: { sortBy: (pid: strin
         },
       },
       ...(p.config.options ? [{ label: t("Edit options"), icon: <span>◉</span>, onSelect: () => setOptionsFor({ p, anchor }) } as MenuEntry] : []),
+      ...(["formula", "relation", "rollup"].includes(p.type)
+        ? [{ label: t(p.type === "formula" ? "Edit formula" : p.type === "relation" ? "Relation settings" : "Rollup settings"), icon: <span>{typeIcon(p.type)}</span>, onSelect: () => setConfigFor(p) } as MenuEntry]
+        : []),
       ...(view
         ? [
             { separator: true } as MenuEntry,
@@ -305,7 +371,7 @@ export function usePropertyMenu(reload: () => void, view?: { sortBy: (pid: strin
             ...(!isTitle ? [{ label: t("Hide in view"), icon: <Icon name="eye" />, onSelect: () => view.hide(p.id) } as MenuEntry] : []),
           ]
         : []),
-      ...(!isTitle && p.type !== "created_time" && p.type !== "last_edited_time"
+      ...(!isTitle && !["created_time", "last_edited_time", "formula", "rollup"].includes(p.type)
         ? [
             { separator: true } as MenuEntry,
             { heading: t("Change type") } as MenuEntry,
@@ -331,6 +397,7 @@ export function usePropertyMenu(reload: () => void, view?: { sortBy: (pid: strin
   const element = (
     <>
       {menu.anchor && <Menu anchor={menu.anchor} items={items} onClose={menu.close} />}
+      {configFor && db && <ComputedConfigDialog p={configFor} db={db} onClose={() => setConfigFor(null)} onSaved={() => (setConfigFor(null), reload())} />}
       {optionsFor && (
         <Popover anchor={optionsFor.anchor} onClose={() => setOptionsFor(null)} width={300}>
           <OptionsEditor p={optionsFor.p} onSaved={() => { reload(); }} t={t} />
@@ -339,6 +406,90 @@ export function usePropertyMenu(reload: () => void, view?: { sortBy: (pid: strin
     </>
   );
   return { open, element };
+}
+
+const FORMULA_HELP = [
+  ['prop("Name")', "value of a property"],
+  ["+ - * / %", "math (+ also joins text)"],
+  ["== != > < >= <=, and, or, not", "comparisons and logic"],
+  ['if(cond, a, b)', "choose a value"],
+  ['concat(a, b, …), upper(), lower(), length(), contains(text, part), replace(t, a, b)', "text"],
+  ["round(n, digits), floor, ceil, abs, min, max, sum, average, toNumber, toText", "numbers"],
+  ['today(), dateAdd(d, 3, "days"), dateSubtract, dateBetween(a, b, "days"), formatDate(d, "DD/MM/YYYY"), year, month, day', "dates"],
+  ["empty(x)", "true when blank"],
+];
+const ROLLUP_FUNCTIONS = ["count", "count_values", "sum", "average", "min", "max", "percent_checked", "earliest", "latest", "show_original"];
+
+/** Settings for computed and linked properties: formula expression, relation target, rollup wiring. */
+function ComputedConfigDialog({ p, db, onClose, onSaved }: { p: Property; db: DatabaseInfo; onClose: () => void; onSaved: () => void }) {
+  const s = useStore();
+  const { t } = useI18n();
+  const [cfg, setCfg] = useState<Record<string, unknown>>({ ...p.config });
+  const [dbs, setDbs] = useState<{ id: string; title: string }[]>([]);
+  const [targetProps, setTargetProps] = useState<Property[]>([]);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (p.type === "relation") api.pages.ofKind("database").then((x) => setDbs(x.map((d) => ({ id: d.id, title: d.title })))).catch(s.fail);
+  }, [p.type, s.fail]);
+  const relProp = db.properties.find((x) => x.id === cfg.relationPropertyId);
+  useEffect(() => {
+    const target = relProp?.config.databaseId as string | undefined;
+    if (p.type === "rollup" && target) api.databases.get(target).then((d) => setTargetProps(d.properties)).catch(() => setTargetProps([]));
+  }, [p.type, relProp]);
+  const save = () => api.databases.updateProperty(p.id, { config: cfg }).then(onSaved).catch((e) => setError(String((e as { message?: string }).message ?? e)));
+  return (
+    <Modal title={`${typeIcon(p.type)} ${p.name}`} onClose={onClose} wide footer={<><button className="btn" onClick={onClose}>{t("Cancel")}</button><button className="btn primary" onClick={save}>{t("Save")}</button></>}>
+      {p.type === "formula" && (
+        <>
+          <div className="field">
+            <label>{t("Formula")}</label>
+            <textarea className="textarea mono" rows={4} autoFocus spellCheck={false} value={String(cfg.expression ?? "")} onChange={(e) => setCfg({ ...cfg, expression: e.target.value })}
+              placeholder={'prop("Price") * prop("Qty")'} />
+          </div>
+          <div className="small-text muted" style={{ marginBottom: 6 }}>{t("Properties")}: {db.properties.filter((x) => x.id !== p.id).map((x) => (
+            <button key={x.id} className="chip" style={{ margin: 2, border: 0 }} onClick={() => setCfg({ ...cfg, expression: `${cfg.expression ?? ""}prop("${x.name}")` })}>{x.name}</button>
+          ))}</div>
+          <table className="plain small-text">
+            <tbody>{FORMULA_HELP.map(([code, what]) => <tr key={code}><td className="mono">{code}</td><td className="muted">{t(what)}</td></tr>)}</tbody>
+          </table>
+        </>
+      )}
+      {p.type === "relation" && (
+        <div className="field">
+          <label>{t("Related database")}</label>
+          <select className="select" value={String(cfg.databaseId ?? "")} onChange={(e) => setCfg({ ...cfg, databaseId: e.target.value })}>
+            <option value="">{t("Choose…")}</option>
+            {dbs.map((d) => <option key={d.id} value={d.id}>{d.title || t("Untitled")}{d.id === db.id ? ` (${t("this database")})` : ""}</option>)}
+          </select>
+        </div>
+      )}
+      {p.type === "rollup" && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "0 12px" }}>
+          <div className="field">
+            <label>{t("Relation")}</label>
+            <select className="select" value={String(cfg.relationPropertyId ?? "")} onChange={(e) => setCfg({ ...cfg, relationPropertyId: e.target.value, targetPropertyId: "" })}>
+              <option value="">{t("Choose…")}</option>
+              {db.properties.filter((x) => x.type === "relation").map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+          </div>
+          <div className="field">
+            <label>{t("Property")}</label>
+            <select className="select" value={String(cfg.targetPropertyId ?? "")} onChange={(e) => setCfg({ ...cfg, targetPropertyId: e.target.value })}>
+              <option value="">—</option>
+              {targetProps.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+            </select>
+          </div>
+          <div className="field">
+            <label>{t("Calculate")}</label>
+            <select className="select" value={String(cfg.function ?? "count")} onChange={(e) => setCfg({ ...cfg, function: e.target.value })}>
+              {ROLLUP_FUNCTIONS.map((f) => <option key={f} value={f}>{t(f)}</option>)}
+            </select>
+          </div>
+        </div>
+      )}
+      {error && <div className="cb-error" role="alert">{error}</div>}
+    </Modal>
+  );
 }
 
 function OptionsEditor({ p, onSaved, t }: { p: Property; onSaved: () => void; t: (s: string) => string }) {

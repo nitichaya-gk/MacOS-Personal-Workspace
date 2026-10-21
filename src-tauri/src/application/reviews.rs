@@ -21,6 +21,7 @@ pub fn today_plan(conn: &Connection) -> Result<Value> {
         "habits": habits::due_today(conn)?,
         "goals": top_goals,
         "runningSession": skills::running_session(conn)?,
+        "schedule": super::timetable::today(conn)?,
         "focusMinutesToday": focus_today,
     }))
 }

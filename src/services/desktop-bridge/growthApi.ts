@@ -1,6 +1,6 @@
 import { rpc } from "./api";
 import type {
-  Account, Category, Draft, Evidence, FocusSession, Goal, GoalMetrics, GoalSkill, Habit, HabitSchedule, Milestone,
+  Account, Category, Course, CsvImportResult, Draft, Recurring, Resource, Topic, Evidence, FocusSession, Goal, GoalMetrics, GoalSkill, Habit, HabitSchedule, Milestone,
   MonthSummary, Requirement, SavingsGoal, Skill, Task, Transaction,
 } from "../../shared/types";
 
@@ -101,8 +101,27 @@ export const growth = {
     createSavingsGoal: (savingsGoal: Obj) => rpc<{ id: string }>("finance.createSavingsGoal", { savingsGoal }),
     deleteSavingsGoal: (id: string) => rpc("finance.deleteSavingsGoal", { id }),
     allocate: (id: string, amount: string, note = "") => rpc("finance.allocate", { id, amount, note }),
+    recurring: () => rpc<Recurring[]>("finance.recurring"),
+    saveRecurring: (id: string | null, recurring: Obj) => rpc<{ id: string }>("finance.saveRecurring", { id, recurring }),
+    deleteRecurring: (id: string) => rpc("finance.deleteRecurring", { id }),
+    settleRecurring: (id: string, post: boolean) => rpc<{ nextDate: string }>("finance.settleRecurring", { id, post }),
+    importCsv: (accountId: string, csv: string, mapping: Obj, dryRun: boolean) => rpc<CsvImportResult>("finance.importCsv", { accountId, csv, mapping, dryRun }),
+    drafts: () => rpc<{ id: string; payload: { type: "income" | "expense"; amount: string | number; occurredOn?: string; merchantOrSource?: string; note?: string }; source: string; createdAt: string }[]>("finance.drafts"),
+    resolveDraft: (id: string, accountId: string | null) => rpc("finance.resolveDraft", { id, accountId }),
     audit: () => rpc<{ entityType: string; entityId: string; action: string; at: string }[]>("finance.audit"),
   },
+  learning: {
+    overview: () => rpc<{ courses: Course[]; topics: Topic[]; resources: Resource[]; reviewsDue: Topic[]; weakTopics: Topic[]; today: string }>("learning.overview"),
+    saveCourse: (id: string | null, course: Obj) => rpc<Course>("learning.saveCourse", { id, course }),
+    deleteCourse: (id: string) => rpc("learning.deleteCourse", { id }),
+    saveTopic: (id: string | null, topic: Obj) => rpc<Topic>("learning.saveTopic", { id, topic }),
+    deleteTopic: (id: string) => rpc("learning.deleteTopic", { id }),
+    review: (id: string, quality: number) => rpc<Topic>("learning.review", { id, quality }),
+    saveResource: (id: string | null, resource: Obj) => rpc<{ id: string }>("learning.saveResource", { id, resource }),
+    deleteResource: (id: string) => rpc("learning.deleteResource", { id }),
+  },
+  orphans: () =>
+    rpc<Record<"tasksWithoutGoalOrProject" | "goalsWithoutRequirements" | "goalsWithoutSuccessDefinition" | "requirementsWithoutWork" | "skillsWithoutEvidence", { id: string; title: string }[]>>("goals.orphans"),
   today: () =>
     rpc<{ date: string; tasks: Task[]; habits: Habit[]; goals: Goal[]; runningSession: FocusSession | null; focusMinutesToday: number }>("growth.today"),
   reviews: {

@@ -48,7 +48,7 @@ export interface Backlink {
 
 export type PropertyType =
   | "title" | "text" | "number" | "select" | "multi_select" | "status" | "date" | "checkbox"
-  | "url" | "email" | "files" | "created_time" | "last_edited_time";
+  | "url" | "email" | "files" | "created_time" | "last_edited_time" | "relation" | "formula" | "rollup";
 
 export interface SelectOption {
   id: string;
@@ -65,7 +65,7 @@ export interface Property {
   position: number;
 }
 
-export type ViewType = "table" | "board" | "calendar" | "list";
+export type ViewType = "table" | "board" | "calendar" | "list" | "timeline" | "gallery" | "chart";
 
 export interface FilterCondition {
   propertyId: string;
@@ -88,6 +88,11 @@ export interface ViewConfig {
   hidden?: string[];
   groupBy?: string | null;
   dateProperty?: string | null;
+  coverProperty?: string | null;
+  chartType?: "bar" | "line";
+  aggregate?: "count" | "sum" | "average";
+  valueProperty?: string | null;
+  timelineScale?: "week" | "month" | "quarter";
   widths?: Record<string, number>;
 }
 
@@ -116,6 +121,7 @@ export interface DbRecord {
   createdAt: string;
   updatedAt: string;
   values: Record<string, unknown>;
+  relationTitles: Record<string, string>;
 }
 
 export interface QueryResult {
@@ -146,6 +152,8 @@ export interface Task {
   updatedAt: string;
   links: { id: string; title: string; kind: PageKind; icon: string | null }[];
   milestoneId: string | null;
+  sourceCanvasId: string | null;
+  sourceElementId: string | null;
   estimatedEffortMinutes: number | null;
   actualEffortMinutes: number | null;
   requirementLinks: { requirementId: string; requirementTitle: string; goalId: string; goalTitle: string; allocationPct: number }[];
@@ -177,7 +185,7 @@ export interface Settings {
   effectiveTimezone: string;
   dailySummary: { enabled: boolean; time: string };
   backup: { auto: boolean; keep: number };
-  mcp: { enabled: boolean; scope: "all" | "selected"; allowedIds: string[] };
+  mcp: { enabled: boolean; scope: "all" | "selected"; allowedIds: string[]; writeIds?: string[] };
   privacyShield?: boolean;
   notificationsAsked: boolean;
 }
@@ -229,6 +237,78 @@ export type Route =
   | { name: "skills"; id?: string }
   | { name: "habits" }
   | { name: "finance"; tab?: string }
-  | { name: "review"; period?: string };
+  | { name: "review"; period?: string }
+  | { name: "form"; id: string }
+  | { name: "automations" }
+  | { name: "timetable" }
+  | { name: "learning" };
 
 export * from "./growth";
+
+export interface Course {
+  id: string;
+  title: string;
+  provider: string;
+  url: string;
+  goalId: string | null;
+  goalTitle: string | null;
+  status: "planned" | "active" | "paused" | "done";
+  startDate: string | null;
+  endDate: string | null;
+  notes: string;
+}
+
+export interface Topic {
+  id: string;
+  courseId: string | null;
+  courseTitle: string | null;
+  title: string;
+  skillId: string | null;
+  skillName: string | null;
+  prerequisites: string[];
+  status: "not_started" | "learning" | "reviewing" | "mastered";
+  ease: number;
+  intervalDays: number;
+  reviewDue: string | null;
+  lastReviewedAt: string | null;
+  errorCount: number;
+}
+
+export interface Resource {
+  id: string;
+  courseId: string | null;
+  topicId: string | null;
+  title: string;
+  kind: "link" | "book" | "video" | "exercise" | "note" | "file";
+  url: string;
+  pageId: string | null;
+  done: boolean;
+}
+
+export interface Recurring {
+  id: string;
+  title: string;
+  type: "income" | "expense";
+  accountId: string;
+  accountName: string;
+  categoryId: string | null;
+  categoryName: string | null;
+  amountMinor: number;
+  currency: string;
+  frequency: "weekly" | "monthly" | "yearly";
+  nextDate: string;
+  endDate: string | null;
+  linkedGoalId: string | null;
+  active: boolean;
+  due: boolean;
+}
+
+export interface CsvImportResult {
+  dryRun: boolean;
+  rows: number;
+  toAdd: number;
+  duplicates: number;
+  errors: string[];
+  preview: { date: string; type: "income" | "expense"; amountMinor: number; description: string; currency: string }[];
+  columns: string[];
+}

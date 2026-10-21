@@ -42,11 +42,14 @@ pub struct Task {
     pub skills: Vec<Value>,
     /// [{id, title, status}]
     pub depends_on: Vec<Value>,
+    /// Canvas object this task was created from (Canvas-to-Task).
+    pub source_canvas_id: Option<String>,
+    pub source_element_id: Option<String>,
 }
 
 const TASK_SELECT: &str = "SELECT t.id, t.title, t.description, t.status, t.priority, t.due_date, t.remind_at, t.project_id, pr.title,
     t.source_page_id, sp.title, t.completed_at, t.deleted_at, t.created_at, t.updated_at,
-    t.milestone_id, t.estimated_effort_minutes, t.actual_effort_minutes
+    t.milestone_id, t.estimated_effort_minutes, t.actual_effort_minutes, t.source_canvas_id, t.source_element_id
     FROM tasks t LEFT JOIN pages pr ON pr.id = t.project_id LEFT JOIN pages sp ON sp.id = t.source_page_id";
 
 fn row_to_task(r: &Row, tz: &chrono_tz::Tz) -> rusqlite::Result<Task> {
@@ -75,6 +78,8 @@ fn row_to_task(r: &Row, tz: &chrono_tz::Tz) -> rusqlite::Result<Task> {
         requirement_links: vec![],
         skills: vec![],
         depends_on: vec![],
+        source_canvas_id: r.get(18)?,
+        source_element_id: r.get(19)?,
     })
 }
 
@@ -295,7 +300,9 @@ pub fn create(conn: &Connection, p: &Value) -> Result<Task> {
             o.remove(k);
         }
     }
-    update(conn, &id, &rest)
+    let t = update(conn, &id, &rest)?;
+    super::automations::dispatch(conn, json!({ "type": "task_created", "taskId": id }));
+    Ok(t)
 }
 
 pub fn update(conn: &Connection, id: &str, patch: &Value) -> Result<Task> {
@@ -317,6 +324,8 @@ pub fn update(conn: &Connection, id: &str, patch: &Value) -> Result<Task> {
     set_text("project_id", "projectId")?;
     set_text("source_page_id", "sourcePageId")?;
     set_text("milestone_id", "milestoneId")?;
+    set_text("source_canvas_id", "sourceCanvasId")?;
+    set_text("source_element_id", "sourceElementId")?;
     set_growth_links(&tx, id, patch)?;
     if let Some(s) = patch.get("status").and_then(|s| s.as_str()) {
         let completed = if s == "done" { before.completed_at.clone().or(Some(ts.clone())) } else { None };
@@ -337,7 +346,12 @@ pub fn update(conn: &Connection, id: &str, patch: &Value) -> Result<Task> {
     reschedule(&tx, id)?;
     tx.commit()?;
     index(conn, id)?;
-    get(conn, id)
+    let after = get(conn, id)?;
+    if after.status != before.status {
+        super::automations::dispatch(conn, json!({ "type": "task_status_changed", "taskId": id, "from": before.status, "to": after.status }));
+        return get(conn, id);
+    }
+    Ok(after)
 }
 
 /// Keeps exactly one pending reminder per open task with a future reminder time.

@@ -45,6 +45,6 @@ integrations/mcp             stdio JSON-RPC server → same application/ service
 
 ## Known limits
 
-- Reminders and the daily summary run while the app is open (a background agent is a later phase, PRD §8.2).
+- Reminders run in the app while it is open. When it is closed they need the optional background agent (Settings → General → Notifications), a per-user LaunchAgent that shares a claim table with the app so nothing is notified twice.
 - CSP is disabled (`csp: null`); the app loads no remote content, but a strict CSP should be added after testing Excalidraw/Mermaid under it.
-- Database queries load one database into memory for filtering/sorting; fine for the NFR-04 target per database, but not yet benchmarked on reference hardware (AC-20).
+- Database queries load one database into memory for filtering/sorting; at 100k records a query takes ~0.3 s (see [performance.md](performance.md)).

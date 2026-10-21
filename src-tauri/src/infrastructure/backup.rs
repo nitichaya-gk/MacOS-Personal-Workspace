@@ -182,3 +182,65 @@ pub fn integrity(conn: &Connection, root: &Path) -> Result<Value> {
         "pages": pages,
     }))
 }
+
+// ---------- encrypted exports ----------
+
+const MAGIC: &[u8] = b"PWENC1";
+const PBKDF2_ROUNDS: u32 = 600_000;
+
+fn derive_key(password: &str, salt: &[u8]) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_bytes(), salt, PBKDF2_ROUNDS, &mut key);
+    key
+}
+
+pub fn encrypt(data: &[u8], password: &str) -> Result<Vec<u8>> {
+    use aes_gcm::aead::{rand_core::RngCore, Aead, AeadCore, KeyInit, OsRng};
+    if password.chars().count() < 8 {
+        return invalid("use a password of at least 8 characters");
+    }
+    let mut salt = [0u8; 16];
+    OsRng.fill_bytes(&mut salt);
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(&derive_key(password, &salt)).map_err(|_| AppError::Invalid("key error".into()))?;
+    let nonce = aes_gcm::Aes256Gcm::generate_nonce(&mut OsRng);
+    let ct = cipher.encrypt(&nonce, data).map_err(|_| AppError::Invalid("encryption failed".into()))?;
+    Ok([MAGIC, &salt, nonce.as_slice(), &ct].concat())
+}
+
+pub fn decrypt(data: &[u8], password: &str) -> Result<Vec<u8>> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    if !is_encrypted(data) || data.len() < MAGIC.len() + 16 + 12 + 16 {
+        return invalid("this is not an encrypted Personal Workspace backup");
+    }
+    let (salt, rest) = data[MAGIC.len()..].split_at(16);
+    let (nonce, ct) = rest.split_at(12);
+    let cipher = aes_gcm::Aes256Gcm::new_from_slice(&derive_key(password, salt)).map_err(|_| AppError::Invalid("key error".into()))?;
+    cipher.decrypt(aes_gcm::Nonce::from_slice(nonce), ct).map_err(|_| AppError::Invalid("wrong password, or the file is damaged".into()))
+}
+
+pub fn is_encrypted(data: &[u8]) -> bool {
+    data.starts_with(MAGIC)
+}
+
+/// Zip export encrypted with a password (AES-256-GCM, PBKDF2-SHA256 key). There is no recovery without the password.
+pub fn export_encrypted(conn: &Connection, root: &Path, manifest: &Value, dest: &Path, password: &str) -> Result<Value> {
+    let tmp_zip = std::env::temp_dir().join(format!("pw-export-{}.zip", crate::domain::new_id()));
+    let result = (|| -> Result<Value> {
+        export_zip(conn, root, manifest, &tmp_zip)?;
+        let enc = encrypt(&fs::read(&tmp_zip)?, password)?;
+        filesystem::atomic_write(dest, &enc)?;
+        Ok(json!({ "path": dest.to_string_lossy(), "sizeBytes": enc.len(), "encrypted": true }))
+    })();
+    let _ = fs::remove_file(&tmp_zip);
+    result
+}
+
+/// Restores an encrypted export into a new folder (decrypts to a temporary zip first).
+pub fn restore_encrypted(source: &Path, dest: &Path, password: &str) -> Result<Value> {
+    let plain = decrypt(&fs::read(source)?, password)?;
+    let tmp_zip = std::env::temp_dir().join(format!("pw-restore-{}.zip", crate::domain::new_id()));
+    fs::write(&tmp_zip, plain)?;
+    let r = restore(&tmp_zip, dest);
+    let _ = fs::remove_file(&tmp_zip);
+    r
+}

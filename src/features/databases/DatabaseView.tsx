@@ -10,8 +10,11 @@ import { Menu, Popover, useAnchor, type Anchor } from "../../components/ui/Popov
 import { usePropertyMenu } from "./cells";
 import { countConditions, FilterEditor, PropertiesEditor, SortEditor } from "./filters";
 import { BoardView, CalendarView, ListView, TableView, type ViewProps } from "./views";
+import { ChartView, GalleryView, TimelineView } from "./views2";
+import { FormsManager } from "./forms";
 
-const VIEW_ICONS: Record<ViewType, string> = { table: "table", board: "board", calendar: "calendar", list: "list" };
+const VIEW_ICONS: Record<ViewType, string> = { table: "table", board: "board", calendar: "calendar", list: "list", timeline: "sort", gallery: "template", chart: "database" };
+const ALL_VIEWS: ViewType[] = ["table", "board", "calendar", "list", "timeline", "gallery", "chart"];
 const PAGE = 200;
 
 export function DatabaseView({ id, embedded, viewId, onViewChange }: { id: string; embedded?: boolean; viewId?: string; onViewChange?: (viewId: string) => void }) {
@@ -28,6 +31,7 @@ export function DatabaseView({ id, embedded, viewId, onViewChange }: { id: strin
   const newMenu = useAnchor();
   const moreMenu = useAnchor();
   const addView = useAnchor();
+  const [formsOpen, setFormsOpen] = useState(false);
 
   const loadDb = useCallback(() => api.databases.get(id).then((d) => (setDb(d), setError(null))).catch((e) => setError(errorMessage(e))), [id]);
   useEffect(() => {
@@ -37,7 +41,7 @@ export function DatabaseView({ id, embedded, viewId, onViewChange }: { id: strin
   const view: View | undefined = db?.views.find((v) => v.id === activeId) ?? db?.views[0];
   const loadRecords = useCallback(() => {
     if (!view) return;
-    const lim = view.type === "table" || view.type === "list" ? limit : 2000;
+    const lim = view.type === "table" || view.type === "list" || view.type === "gallery" ? limit : 5000;
     api.databases
       .query(id, { viewId: view.id, search: search || undefined, limit: lim })
       .then((r) => (setRecords(r.records), setTotal(r.total)))
@@ -64,7 +68,7 @@ export function DatabaseView({ id, embedded, viewId, onViewChange }: { id: strin
     saveConfig(view.id, config);
   };
 
-  const propMenu = usePropertyMenu(reload, {
+  const propMenu = usePropertyMenu(db, reload, {
     sortBy: (pid, direction) => updateConfig({ sorts: [{ propertyId: pid, direction }, ...(view?.config.sorts ?? []).filter((x) => x.propertyId !== pid)] }),
     hide: (pid) => updateConfig({ hidden: [...(view?.config.hidden ?? []), pid] }),
     filterBy: (pid) => setPanel({ kind: "filter", anchor: document.querySelector(`[data-db="${id}"] .filter-btn`) as HTMLElement, propertyId: pid }),
@@ -147,6 +151,42 @@ export function DatabaseView({ id, embedded, viewId, onViewChange }: { id: strin
             {db.properties.filter((p) => p.type === "select" || p.type === "status").map((p) => <option key={p.id} value={p.id}>{t("Group by {name}", { name: p.name })}</option>)}
           </select>
         )}
+        {view.type === "timeline" && (
+          <>
+            <select className="select" style={{ width: 150, height: 24, fontSize: 12 }} value={view.config.dateProperty ?? ""} aria-label={t("Date property")} onChange={(e) => updateConfig({ dateProperty: e.target.value || null })}>
+              {db.properties.filter((p) => p.type === "date").map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            <select className="select" style={{ width: 110, height: 24, fontSize: 12 }} value={view.config.timelineScale ?? "month"} aria-label={t("Zoom")} onChange={(e) => updateConfig({ timelineScale: e.target.value as ViewConfig["timelineScale"] })}>
+              <option value="week">{t("Days")}</option><option value="month">{t("Weeks")}</option><option value="quarter">{t("Months")}</option>
+            </select>
+          </>
+        )}
+        {view.type === "gallery" && (
+          <select className="select" style={{ width: 170, height: 24, fontSize: 12 }} value={view.config.coverProperty ?? ""} aria-label={t("Cover")} onChange={(e) => updateConfig({ coverProperty: e.target.value || null })}>
+            <option value="">{t("Cover: page icon")}</option>
+            {db.properties.filter((p) => p.type === "files").map((p) => <option key={p.id} value={p.id}>{t("Cover")}: {p.name}</option>)}
+          </select>
+        )}
+        {view.type === "chart" && (
+          <>
+            <select className="select" style={{ width: 150, height: 24, fontSize: 12 }} value={view.config.groupBy ?? ""} aria-label={t("Group by")} onChange={(e) => updateConfig({ groupBy: e.target.value || null })}>
+              <option value="">{t("No grouping")}</option>
+              {db.properties.filter((p) => ["select", "status", "multi_select", "checkbox", "date", "created_time", "last_edited_time", "text"].includes(p.type)).map((p) => <option key={p.id} value={p.id}>{t("By")} {p.name}</option>)}
+            </select>
+            <select className="select" style={{ width: 110, height: 24, fontSize: 12 }} value={view.config.aggregate ?? "count"} aria-label={t("Measure")} onChange={(e) => updateConfig({ aggregate: e.target.value as ViewConfig["aggregate"] })}>
+              <option value="count">{t("Count")}</option><option value="sum">{t("Sum")}</option><option value="average">{t("Average")}</option>
+            </select>
+            {view.config.aggregate && view.config.aggregate !== "count" && (
+              <select className="select" style={{ width: 140, height: 24, fontSize: 12 }} value={view.config.valueProperty ?? ""} aria-label={t("Value")} onChange={(e) => updateConfig({ valueProperty: e.target.value || null })}>
+                <option value="">{t("Choose…")}</option>
+                {db.properties.filter((p) => ["number", "formula", "rollup"].includes(p.type)).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            )}
+            <select className="select" style={{ width: 90, height: 24, fontSize: 12 }} value={view.config.chartType ?? "line"} aria-label={t("Chart type")} onChange={(e) => updateConfig({ chartType: e.target.value as ViewConfig["chartType"] })}>
+              <option value="bar">{t("Bars")}</option><option value="line">{t("Line (over time)")}</option>
+            </select>
+          </>
+        )}
         {view.type === "calendar" && (
           <select className="select" style={{ width: 160, height: 24, fontSize: 12 }} value={view.config.dateProperty ?? ""} aria-label={t("Date property")} onChange={(e) => updateConfig({ dateProperty: e.target.value || null })}>
             {db.properties.filter((p) => p.type === "date").map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
@@ -168,8 +208,12 @@ export function DatabaseView({ id, embedded, viewId, onViewChange }: { id: strin
       {view.type === "board" && <BoardView {...props} />}
       {view.type === "calendar" && <CalendarView {...props} />}
       {view.type === "list" && <ListView {...props} />}
+      {view.type === "timeline" && <TimelineView {...props} />}
+      {view.type === "gallery" && <GalleryView {...props} />}
+      {view.type === "chart" && <ChartView {...props} />}
 
       {propMenu.element}
+      {formsOpen && <FormsManager db={db} onClose={() => setFormsOpen(false)} />}
       {panel && (
         <Popover anchor={panel.anchor} onClose={() => setPanel(null)}>
           {panel.kind === "filter" && <FilterEditor db={db} config={view.config} initialProperty={panel.propertyId} onChange={(f: FilterGroup) => updateConfig({ filter: f })} />}
@@ -181,7 +225,7 @@ export function DatabaseView({ id, embedded, viewId, onViewChange }: { id: strin
         <Menu
           anchor={addView.anchor}
           onClose={addView.close}
-          items={(["table", "board", "calendar", "list"] as ViewType[]).map((vt) => ({
+          items={ALL_VIEWS.map((vt) => ({
             label: t(vt[0].toUpperCase() + vt.slice(1)),
             icon: <Icon name={VIEW_ICONS[vt]} />,
             onSelect: () => api.databases.addView(db.id, vt, t(vt[0].toUpperCase() + vt.slice(1))).then((v) => (loadDb(), selectView(v))).catch(s.fail),
@@ -222,11 +266,12 @@ export function DatabaseView({ id, embedded, viewId, onViewChange }: { id: strin
           items={[
             { label: t("Rename view"), icon: <Icon name="page" />, onSelect: async () => { const name = await s.prompt({ title: t("Rename view"), defaultValue: view.name }); if (name?.trim()) api.databases.updateView(view.id, { name }).then(loadDb).catch(s.fail); } },
             { heading: t("Change view type") },
-            ...(["table", "board", "calendar", "list"] as ViewType[]).filter((vt) => vt !== view.type).map((vt) => ({
+            ...ALL_VIEWS.filter((vt) => vt !== view.type).map((vt) => ({
               label: t(vt[0].toUpperCase() + vt.slice(1)), icon: <Icon name={VIEW_ICONS[vt]} />,
               onSelect: () => api.databases.updateView(view.id, { type: vt }).then(loadDb).catch(s.fail),
             })),
             { separator: true },
+            { label: t("Forms…"), icon: <Icon name="page" />, onSelect: () => setFormsOpen(true) },
             { label: t("Export CSV…"), icon: <Icon name="download" />, onSelect: () => exportAs("csv") },
             { label: t("Export JSON…"), icon: <Icon name="download" />, onSelect: () => exportAs("json") },
             { separator: true },

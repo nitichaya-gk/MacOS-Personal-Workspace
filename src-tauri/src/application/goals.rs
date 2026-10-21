@@ -604,7 +604,7 @@ pub fn create_draft(conn: &Connection, goal_id: &str, payload: &Value, source: &
 
 pub fn list_drafts(conn: &Connection, goal_id: Option<&str>) -> Result<Vec<Value>> {
     let mut stmt = conn.prepare(
-        "SELECT id, kind, target_id, payload_json, source, created_at FROM drafts WHERE status='pending' AND (?1 IS NULL OR target_id=?1) ORDER BY created_at DESC",
+        "SELECT id, kind, target_id, payload_json, source, created_at FROM drafts WHERE status='pending' AND kind='goal_breakdown' AND (?1 IS NULL OR target_id=?1) ORDER BY created_at DESC",
     )?;
     let rows = stmt.query_map([goal_id], |r| {
         Ok(json!({ "id": r.get::<_, String>(0)?, "kind": r.get::<_, String>(1)?, "targetId": r.get::<_, Option<String>>(2)?,
@@ -725,4 +725,20 @@ pub fn options(conn: &Connection) -> Result<Vec<Value>> {
             Ok(json!({ "id": id, "title": title, "requirements": reqs, "milestones": ms }))
         })
         .collect()
+}
+
+/// Orphan detector: items that are not connected to anything that measures progress.
+pub fn orphans(conn: &Connection) -> Result<Value> {
+    let list = |sql: &str| -> Result<Vec<Value>> {
+        Ok(conn.prepare(sql)?.query_map([], |r| Ok(json!({ "id": r.get::<_, String>(0)?, "title": r.get::<_, String>(1)? })))?.collect::<std::result::Result<_, _>>()?)
+    };
+    Ok(json!({
+        "tasksWithoutGoalOrProject": list("SELECT id, title FROM tasks WHERE deleted_at IS NULL AND status<>'done' AND project_id IS NULL AND milestone_id IS NULL
+            AND id NOT IN (SELECT task_id FROM task_requirement_links) ORDER BY created_at DESC LIMIT 50")?,
+        "goalsWithoutRequirements": list("SELECT id, title FROM goals WHERE deleted_at IS NULL AND status IN ('draft','active') AND id NOT IN (SELECT goal_id FROM goal_requirements)")?,
+        "goalsWithoutSuccessDefinition": list("SELECT id, title FROM goals WHERE deleted_at IS NULL AND status='active' AND trim(success_definition)=''")?,
+        "requirementsWithoutWork": list("SELECT g.id, r.title || ' — ' || g.title FROM goal_requirements r JOIN goals g ON g.id=r.goal_id WHERE g.deleted_at IS NULL AND g.status='active' AND r.satisfaction_status<>'met'
+            AND r.id NOT IN (SELECT requirement_id FROM task_requirement_links) AND r.id NOT IN (SELECT requirement_id FROM milestones WHERE requirement_id IS NOT NULL)")?,
+        "skillsWithoutEvidence": list("SELECT id, name FROM skills WHERE deleted_at IS NULL AND id NOT IN (SELECT skill_id FROM skill_evidence)")?,
+    }))
 }
