@@ -1,0 +1,9 @@
+node_modules/
+dist/
+public/fonts/
+src-tauri/target/
+src-tauri/gen/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.DS_Store
