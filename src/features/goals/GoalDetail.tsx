@@ -3,7 +3,7 @@ import { useStore } from "../../app/providers/store";
 import { useI18n } from "../../app/providers/i18n";
 import { errorMessage } from "../../services/desktop-bridge/api";
 import { growth, money, pct, type GoalDetail as Detail } from "../../services/desktop-bridge/growthApi";
-import type { Goal, Milestone, Requirement, Skill } from "../../shared/types";
+import type { Goal, Milestone, Skill } from "../../shared/types";
 import { formatDate } from "../../shared/utils";
 import { Icon } from "../../components/ui/Icon";
 import { EmptyState } from "../../components/ui/Modal";
@@ -116,7 +116,6 @@ export function GoalDetailView({ id, initialTab }: { id: string; initialTab?: st
 }
 
 function Overview({ d, save, setTab }: { d: Detail; save: (p: Record<string, unknown>) => Promise<unknown>; setTab: (t: Tab) => void }) {
-  const s = useStore();
   const { t } = useI18n();
   const m = d.metrics;
   const g = d.goal;
@@ -168,7 +167,6 @@ function Overview({ d, save, setTab }: { d: Detail; save: (p: Record<string, unk
       </div>
       <div className="h-section">{t("Next actions")}</div>
       {next.length ? next.map((x) => <TaskRow key={x.id} task={x} />) : <div className="muted small-text">{t("No open tasks. Add milestones and tasks in the Roadmap tab.")}</div>}
-      {s.counts && null}
     </>
   );
 }
@@ -179,7 +177,7 @@ function Requirements({ d, reload, onEvidence }: { d: Detail; reload: () => void
   const [open, setOpen] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const progress = useMemo(() => new Map(d.metrics.preparation.requirements.map((r) => [r.id, r])), [d]);
-  const upd = (id: string, patch: Partial<Requirement> & Record<string, unknown>) => growth.goals.updateRequirement(id, patch).then(reload).catch(s.fail);
+  const upd = (id: string, patch: Record<string, unknown>) => growth.goals.updateRequirement(id, patch).then(reload).catch(s.fail);
   const add = () => title.trim() && growth.goals.addRequirement(d.goal.id, { title }).then((r) => (setTitle(""), setOpen(r.id), reload())).catch(s.fail);
 
   return (

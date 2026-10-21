@@ -31,6 +31,18 @@ integrations/mcp             stdio JSON-RPC server → same application/ service
 - **Canvas engine.** Excalidraw (MIT) provides drawing, binding arrows, grouping, alignment, layers, locking, undo and export. Elements are stored one row per object in `canvas_objects` as editable JSON; images go to `assets/`. Fonts are bundled for offline use.
 - **Assets.** Files are stored as `assets/<uuid>.<ext>` and served through the `wsasset://` protocol, so URLs stay valid when the workspace moves or is restored elsewhere. Asset ids are validated against path traversal.
 
+## Personal Growth decisions (answers to the extension PRD's open ADRs)
+
+- **Typed join tables, not a generic `entity_links`.** `task_requirement_links`, `task_skill_links`, `goal_skills`, `task_dependencies` keep SQLite foreign keys and cascades. The existing `links` table still handles free-form references.
+- **One task, many goals, no double counting.** A task's allocations across requirements must total ≤ 100%, and goal metrics collect each task once.
+- **Requirement progress.** Binary-style types count 0 until met; numeric/score use `clamp(current ÷ target)`; missing values are *unknown*, reported separately. Measured requirements can be marked met below target only with an override reason.
+- **Skill levels.** Only from evidence with a rubric level; the rubric is versioned so old evidence stays tied to the rubric it was scored with. Default rubric is generic (0–5) and editable per skill.
+- **Health** is rules-based (blocked requirement, missed deadlines, time used vs preparation, overdue tasks, unverified/outdated criteria (> 90 days), no review for 14 days) and is never presented as a probability.
+- **Money** is stored as integer minor units; totals are per currency with no conversion; transfers between different currencies are refused.
+- **MCP writes** go through drafts only. When the app is closed, the MCP process still writes drafts through the same services to the same SQLite file (WAL), and the user applies them later.
+- **Paused goals** do not stop linked habit reminders automatically (left to the user).
+- **Nested transactions.** `infrastructure::database::begin` joins an outer transaction when one is open, so applying a draft (requirements → milestones → tasks) is atomic.
+
 ## Known limits
 
 - Reminders and the daily summary run while the app is open (a background agent is a later phase, PRD §8.2).

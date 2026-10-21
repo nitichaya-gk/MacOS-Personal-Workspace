@@ -67,7 +67,7 @@ const StoreContext = createContext<Store | null>(null);
 
 /** `#/page/<id>`, `#/tasks`, `#/settings/mcp` … opens that screen first (handy for links and testing). */
 function routeFromHash(): Route {
-  const [name, arg] = location.hash.replace(/^#\/?/, "").split("/");
+  const [name, arg, extra] = location.hash.replace(/^#\/?/, "").split("/");
   switch (name) {
     case "page":
     case "section":
@@ -81,7 +81,17 @@ function routeFromHash(): Route {
     case "trash":
     case "archive":
     case "templates":
+    case "habits":
+    case "finance":
       return { name };
+    case "goals":
+      return { name, domain: arg };
+    case "goal":
+      return arg ? { name, id: arg, tab: extra } : { name: "goals" };
+    case "skills":
+      return { name, id: arg };
+    case "review":
+      return { name, period: arg };
     default:
       return { name: "home" };
   }

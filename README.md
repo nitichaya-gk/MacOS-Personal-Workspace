@@ -1,6 +1,6 @@
 # Personal Workspace (macOS)
 
-A local-first workspace for one person on one Mac: pages with a block editor, databases (Table / Board / Calendar / List), tasks with a Today view and macOS reminders, diagram and wireframe canvases, templates, full-text search (Thai and English), backup/restore, export, and a read-only MCP server for Claude and Codex. Built from [PRD.md](PRD.md) — roadmap phases 1 and 2.
+A local-first workspace for one person on one Mac: pages with a block editor, databases (Table / Board / Calendar / List), tasks with a Today view and macOS reminders, diagram and wireframe canvases, templates, full-text search (Thai and English), backup/restore, export, and a read-only MCP server for Claude and Codex. Built from [PRD.md](PRD.md) (roadmap phases 1 and 2) plus the Personal Growth extension PRD (goals, learning, habits, finance — the §21 MVP vertical slice).
 
 Everything is stored on this Mac in a folder you control; nothing is sent anywhere unless you export it or connect an MCP client.
 
@@ -12,7 +12,7 @@ Requirements: macOS 13+, Xcode Command Line Tools, Node 20+, Rust (installed wit
 npm install
 npm run app:dev      # development app with hot reload
 npm run app:build    # release .app and .dmg in src-tauri/target/release/bundle/
-npm test             # Rust unit + acceptance tests (PRD §16)
+npm test             # Rust unit + acceptance tests (PRD §16, extension §16/§20)
 ```
 
 The release app is ad-hoc signed. On first launch from Finder, macOS may ask you to confirm opening it (right-click → Open).
@@ -44,7 +44,23 @@ The release app is ad-hoc signed. On first launch from Finder, macOS may ask you
 | MCP | stdio server inside the app binary (`--mcp`), off by default, scoped to chosen sections/pages, per-database opt-out, audit log |
 | UI | Light/Dark (follows macOS), Thai/English UI, ⌘K command palette, keyboard shortcuts, inspector panel |
 
-Not yet (phase 3+): formulas/relations/rollups, timeline/gallery/chart views, forms, automations, MCP write tools, version history, comments, static site export.
+### Personal Growth extension
+
+| Area | Included |
+| --- | --- |
+| Goals & roadmap | Goals by domain (education, career, finance, personal, project) with measurable success definition; weighted requirements (binary, numeric, score, document, portfolio, external verification) with official source, check date and verified/unverified/outdated state; phase → milestone → task roadmap; task dependencies with cycle protection; tasks link to several requirements with an allocation that can never exceed 100% |
+| Progress | Four separate dimensions — task completion, roadmap progress, requirement preparation, skill readiness — each with its formula one click away; unknown progress shown as "unknown", never as 0; rules-based health (on track / at risk / blocked / needs review) with reasons; a goal cannot be marked achieved while a critical requirement is unmet or success is undefined |
+| Learning & skills | Skills with a per-skill, versioned 0–5 rubric; evidence (mock test, assessment, code review, project, certificate…) with provenance; levels change only from assessed evidence, never from finished tasks; confidence and staleness; goal skill gaps |
+| Focus & habits | Persistent focus timer that rolls minutes into task effort; habits (daily, chosen weekdays, N× per week) with done / skipped / missed, streaks that ignore rest days, 7-day consistency, daily reminders |
+| Finance | Manual accounts, income/expense/transfer stored in integer satang, transfers never counted as income or expense, per-category monthly budgets, savings goals whose allocations cannot exceed available cash, links to goals, soft delete + audit trail, amounts hidden by default |
+| Reviews & Today | Home shows goal pulse, focus timer, habits due and a collapsed budget pulse; weekly review drafted from local data (tasks done/slipped, milestones, evidence, habits, focus vs plan, spending, progress delta) that you edit and save |
+| AI (MCP) | `list_goals`, `get_goal_roadmap`, `get_goal_health`, `get_skill_gap`, `get_today_plan`, `get_habit_summary`, `get_finance_summary` (only with an explicit finance grant), and `suggest_goal_breakdown`, which saves a draft you review and apply in the app |
+
+The bundled CEDT CU goal is an illustrative scenario: its criteria are placeholders marked unverified, not real admission requirements.
+
+Not yet: timeline/Gantt and split view, canvas-selection → task, spaced repetition, CSV import for transactions, recurring transactions, encrypted backups, automations, MCP tools that write directly.
+
+Not yet from the first PRD (phase 3+): formulas/relations/rollups, timeline/gallery/chart views, forms, automations, MCP write tools, version history, comments, static site export.
 
 ## Connect Claude or Codex (MCP)
 
@@ -54,7 +70,7 @@ Enable it in **Settings → MCP**, choose what to share, then copy the snippet s
 claude mcp add personal-workspace -- "/Applications/Personal Workspace.app/Contents/MacOS/personal-workspace" --mcp
 ```
 
-Tools: `search_workspace`, `list_projects`, `read_page`, `query_database`, `list_tasks`, `read_canvas`. See [docs/mcp-tools.md](docs/mcp-tools.md).
+Tools: `search_workspace`, `list_projects`, `read_page`, `query_database`, `list_tasks`, `read_canvas`, plus the growth tools above. See [docs/mcp-tools.md](docs/mcp-tools.md).
 
 ## Project layout
 

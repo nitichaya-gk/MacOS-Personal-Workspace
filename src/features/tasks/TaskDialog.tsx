@@ -7,6 +7,8 @@ import type { Task, TaskPriority, TaskStatus } from "../../shared/types";
 import { addDays } from "../../shared/utils";
 import { Modal } from "../../components/ui/Modal";
 import { kindIcon } from "../../components/ui/Icon";
+import { growth, type GoalOption } from "../../services/desktop-bridge/growthApi";
+import type { Skill } from "../../shared/types";
 
 /** Asks macOS for notification permission the first time a reminder is set. Today keeps working without it. */
 async function ensureNotificationPermission(): Promise<boolean> {
@@ -32,6 +34,21 @@ export function TaskDialog({ id, defaults, onClose }: { id?: string; defaults?: 
   const [projectId, setProjectId] = useState((defaults?.projectId as string) ?? "");
   const [links, setLinks] = useState<string[]>([]);
   const [linkQ, setLinkQ] = useState("");
+  const [milestoneId, setMilestoneId] = useState((defaults?.milestoneId as string) ?? "");
+  const [reqLinks, setReqLinks] = useState<{ requirementId: string; allocationPct: number }[]>([]);
+  const [skillIds, setSkillIds] = useState<string[]>([]);
+  const [estimated, setEstimated] = useState("");
+  const [actual, setActual] = useState("");
+  const [dependsOn, setDependsOn] = useState<string[]>([]);
+  const [goalOptions, setGoalOptions] = useState<GoalOption[]>([]);
+  const [skillOptions, setSkillOptions] = useState<Skill[]>([]);
+  const [openTasks, setOpenTasks] = useState<Task[]>([]);
+  const [showGrowth, setShowGrowth] = useState(false);
+  useEffect(() => {
+    growth.goals.options().then(setGoalOptions).catch(() => {});
+    growth.skills.list().then(setSkillOptions).catch(() => {});
+    api.tasks.list("open", { limit: 300 }).then(setOpenTasks).catch(() => {});
+  }, []);
   const today = s.counts?.date ?? new Date().toISOString().slice(0, 10);
   const projects = s.tree.filter((p) => p.kind === "project" && !p.isTemplate);
 
@@ -47,6 +64,13 @@ export function TaskDialog({ id, defaults, onClose }: { id?: string; defaults?: 
       setRemind(x.remindAtLocal ?? "");
       setProjectId(x.projectId ?? "");
       setLinks(x.links.map((l) => l.id));
+      setMilestoneId(x.milestoneId ?? "");
+      setReqLinks(x.requirementLinks.map((l) => ({ requirementId: l.requirementId, allocationPct: l.allocationPct })));
+      setSkillIds(x.skills.map((k) => k.id));
+      setEstimated(x.estimatedEffortMinutes?.toString() ?? "");
+      setActual(x.actualEffortMinutes?.toString() ?? "");
+      setDependsOn(x.dependsOn.map((d) => d.id));
+      setShowGrowth(!!(x.milestoneId || x.requirementLinks.length || x.skills.length || x.dependsOn.length || x.estimatedEffortMinutes));
     }).catch((e) => (s.fail(e), onClose()));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
@@ -63,6 +87,12 @@ export function TaskDialog({ id, defaults, onClose }: { id?: string; defaults?: 
       remindAtLocal: remind || null,
       projectId: projectId || null,
       links,
+      milestoneId: milestoneId || null,
+      requirementLinks: reqLinks,
+      skillIds,
+      dependsOn,
+      estimatedEffortMinutes: estimated ? Math.round(Number(estimated)) : null,
+      actualEffortMinutes: actual ? Math.round(Number(actual)) : null,
     };
     try {
       if (task) await api.tasks.update(task.id, patch);
@@ -166,6 +196,67 @@ export function TaskDialog({ id, defaults, onClose }: { id?: string; defaults?: 
             ))}
           </div>
         </div>
+        <button type="button" className="btn small ghost" onClick={() => setShowGrowth(!showGrowth)} aria-expanded={showGrowth} style={{ marginBottom: 8 }}>
+          {showGrowth ? "▾" : "▸"} 🎯 {t("Goal, skills & effort")}
+        </button>
+        {showGrowth && (
+          <div className="card-box" style={{ padding: "10px 14px" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "0 12px" }}>
+              <div className="field">
+                <label>{t("Milestone")}</label>
+                <select className="select" value={milestoneId} onChange={(e) => {
+                  setMilestoneId(e.target.value);
+                  const ms = goalOptions.flatMap((g) => g.milestones).find((m) => m.id === e.target.value);
+                  if (ms?.requirementId && !reqLinks.length) setReqLinks([{ requirementId: ms.requirementId, allocationPct: 100 }]);
+                }}>
+                  <option value="">—</option>
+                  {goalOptions.map((g) => <optgroup key={g.id} label={g.title}>{g.milestones.map((m) => <option key={m.id} value={m.id}>{m.phase ? `${m.phase} · ` : ""}{m.title}</option>)}</optgroup>)}
+                </select>
+              </div>
+              <div className="field"><label>{t("Estimated effort (min)")}</label><input className="input" inputMode="numeric" value={estimated} onChange={(e) => setEstimated(e.target.value)} /></div>
+              <div className="field"><label>{t("Actual effort (min)")}</label><input className="input" inputMode="numeric" value={actual} onChange={(e) => setActual(e.target.value)} /></div>
+            </div>
+            <div className="field">
+              <label>{t("Contributes to requirements")} <span className="faint">({t("allocation of this task's effort, total ≤ 100%")})</span></label>
+              {reqLinks.map((l, i) => (
+                <div key={i} className="row" style={{ marginBottom: 4 }}>
+                  <select className="select" value={l.requirementId} onChange={(e) => setReqLinks(reqLinks.map((x, j) => (j === i ? { ...x, requirementId: e.target.value } : x)))}>
+                    {goalOptions.map((g) => <optgroup key={g.id} label={g.title}>{g.requirements.map((r) => <option key={r.id} value={r.id}>{r.title}</option>)}</optgroup>)}
+                  </select>
+                  <input className="input" style={{ width: 70 }} type="number" min={1} max={100} value={l.allocationPct} onChange={(e) => setReqLinks(reqLinks.map((x, j) => (j === i ? { ...x, allocationPct: Number(e.target.value) } : x)))} aria-label={t("Allocation %")} />%
+                  <button type="button" className="icon-btn small" aria-label={t("Remove")} onClick={() => setReqLinks(reqLinks.filter((_, j) => j !== i))}>×</button>
+                </div>
+              ))}
+              {reqLinks.reduce((a, l) => a + (l.allocationPct || 0), 0) > 100 && <div className="small-text" style={{ color: "var(--danger)" }}>{t("Allocations add up to more than 100%.")}</div>}
+              {goalOptions.some((g) => g.requirements.length) && (
+                <button type="button" className="btn small" onClick={() => {
+                  const first = goalOptions.flatMap((g) => g.requirements).find((r) => !reqLinks.some((l) => l.requirementId === r.id));
+                  if (first) setReqLinks([...reqLinks, { requirementId: first.id, allocationPct: Math.max(1, 100 - reqLinks.reduce((a, l) => a + l.allocationPct, 0)) }]);
+                }}>＋ {t("Link requirement")}</button>
+              )}
+            </div>
+            <div className="field">
+              <label>{t("Practises skills")} <span className="faint">({t("practice is tracked; levels change only with evidence")})</span></label>
+              <div className="row wrap" style={{ gap: 4 }}>
+                {skillOptions.map((k) => (
+                  <button type="button" key={k.id} className={`btn small${skillIds.includes(k.id) ? " primary" : ""}`} aria-pressed={skillIds.includes(k.id)}
+                    onClick={() => setSkillIds(skillIds.includes(k.id) ? skillIds.filter((x) => x !== k.id) : [...skillIds, k.id])}>{k.name}</button>
+                ))}
+                {!skillOptions.length && <span className="small-text faint">{t("No skills yet — add them in Learning & skills.")}</span>}
+              </div>
+            </div>
+            <div className="field">
+              <label>{t("Depends on")}</label>
+              <div className="row wrap" style={{ gap: 4 }}>
+                {dependsOn.map((d) => <span key={d} className="chip">⛓ {openTasks.find((x) => x.id === d)?.title ?? task?.dependsOn.find((x) => x.id === d)?.title ?? d.slice(0, 6)}<button type="button" onClick={() => setDependsOn(dependsOn.filter((x) => x !== d))}>×</button></span>)}
+                <select className="select" style={{ width: 240 }} value="" onChange={(e) => e.target.value && setDependsOn([...dependsOn, e.target.value])} aria-label={t("Add dependency")}>
+                  <option value="">{t("Add a prerequisite task…")}</option>
+                  {openTasks.filter((x) => x.id !== task?.id && !dependsOn.includes(x.id)).map((x) => <option key={x.id} value={x.id}>{x.title}</option>)}
+                </select>
+              </div>
+            </div>
+          </div>
+        )}
         <div className="field">
           <label htmlFor="task-desc">{t("Details")}</label>
           <textarea id="task-desc" className="textarea" rows={4} value={description} onChange={(e) => setDescription(e.target.value)} />

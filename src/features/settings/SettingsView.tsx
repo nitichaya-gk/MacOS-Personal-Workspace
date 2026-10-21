@@ -304,6 +304,10 @@ function McpTab() {
               <label key={x.id} className="menu-item"><input type="checkbox" checked={mcp.allowedIds.includes(x.id)} onChange={() => toggle(x.id)} /> {x.icon} {x.name}</label>
             ))}
             <label className="menu-item"><input type="checkbox" checked={mcp.allowedIds.includes("tasks:unassigned")} onChange={() => toggle("tasks:unassigned")} /> ✅ {t("Tasks without a project")}</label>
+            <div className="menu-label">{t("Growth data")}</div>
+            <label className="menu-item"><input type="checkbox" checked={mcp.allowedIds.includes("domain:goals")} onChange={() => toggle("domain:goals")} /> 🎯 {t("Goals & roadmaps")}</label>
+            <label className="menu-item"><input type="checkbox" checked={mcp.allowedIds.includes("domain:skills")} onChange={() => toggle("domain:skills")} /> 🧠 {t("Skills & evidence")}</label>
+            <label className="menu-item"><input type="checkbox" checked={mcp.allowedIds.includes("domain:habits")} onChange={() => toggle("domain:habits")} /> 🔁 {t("Habits")}</label>
             <div className="menu-label">{t("Individual pages, projects and databases")}</div>
             {shareable.map((p) => (
               <label key={p.id} className="menu-item"><input type="checkbox" checked={mcp.allowedIds.includes(p.id)} onChange={() => toggle(p.id)} /> {p.icon || kindIcon(p.kind)} {p.title || t("Untitled")}</label>
@@ -311,10 +315,22 @@ function McpTab() {
           </div>
         )}
       </section>
+      {mcp.enabled && (
+        <section className="card-box" style={{ borderColor: mcp.allowedIds.includes("domain:finance") ? "var(--danger)" : undefined }}>
+          <h3>💰 {t("Finance data (sensitive)")}</h3>
+          <p className="desc">{t("Off by default, even when sharing everything. If enabled, AI clients can read monthly totals, budgets and savings — and may send them to their AI service.")}</p>
+          <label className="row">
+            <input type="checkbox" checked={mcp.allowedIds.includes("domain:finance")} onChange={async () => {
+              if (!mcp.allowedIds.includes("domain:finance") && !(await s.confirm({ title: t("Share finance data with MCP clients?"), message: t("Amounts you track could leave this Mac through the AI client you connect."), confirmLabel: t("Share finance data"), danger: true }))) return;
+              toggle("domain:finance");
+            }} /> {t("Allow get_finance_summary")}
+          </label>
+        </section>
+      )}
       {status && (
         <section className="card-box">
           <h3>{t("Connect a client")}</h3>
-          <p className="desc">{t("The server runs over stdio from this app's own executable. Tools: search_workspace, list_projects, read_page, query_database, list_tasks, read_canvas.")}</p>
+          <p className="desc">{t("The server runs over stdio from this app's own executable. Tools: search_workspace, list_projects, read_page, query_database, list_tasks, read_canvas, list_goals, get_goal_roadmap, get_goal_health, get_skill_gap, get_today_plan, get_habit_summary, get_finance_summary, suggest_goal_breakdown (draft only).")}</p>
           <div className="field-label">Claude Code</div>
           <pre className="code">{status.claudeCode}</pre>
           <button className="btn small" onClick={() => copy(status.claudeCode)}>{t("Copy")}</button>

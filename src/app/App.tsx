@@ -17,6 +17,12 @@ import { SearchView } from "../features/search/SearchView";
 import { TrashView, ArchiveView, SectionView } from "../features/workspace/WorkspaceViews";
 import { TemplatesView } from "../features/templates/TemplatesView";
 import { isTauri } from "../services/desktop-bridge/api";
+import { GoalsView } from "../features/goals/GoalsView";
+import { GoalDetailView } from "../features/goals/GoalDetail";
+import { SkillsView } from "../features/skills/SkillsView";
+import { HabitsView } from "../features/habits/HabitsView";
+import { FinanceView } from "../features/finance/FinanceView";
+import { ReviewView } from "../features/review/ReviewView";
 
 const SettingsView = lazy(() => import("../features/settings/SettingsView").then((m) => ({ default: m.SettingsView })));
 
@@ -39,6 +45,18 @@ function Routes() {
       return <TemplatesView />;
     case "section":
       return <SectionView key={route.id} id={route.id} />;
+    case "goals":
+      return <GoalsView domain={route.domain} />;
+    case "goal":
+      return <GoalDetailView key={route.id} id={route.id} initialTab={route.tab} />;
+    case "skills":
+      return <SkillsView key={route.id ?? "all"} selected={route.id} />;
+    case "habits":
+      return <HabitsView />;
+    case "finance":
+      return <FinanceView />;
+    case "review":
+      return <ReviewView key={route.period ?? "now"} period={route.period} />;
     case "settings":
       return (
         <Suspense fallback={<div className="loading">…</div>}>

@@ -24,6 +24,28 @@ Source of truth: [`src-tauri/migrations/0001_init.sql`](../src-tauri/migrations/
 | `search_docs` + `search_fts` | Derived full-text index (rebuildable) |
 | `templates`, `forms`, `automations`, `automation_runs`, `versions` | Reserved for phase 3 |
 
+### Schema v2 — Personal Growth (`0002_growth.sql`)
+
+| Table | Purpose |
+| --- | --- |
+| `goals` | domain, status, dates, priority, time budget, success definition, risk, last reviewed, `is_example`, `version` (optimistic concurrency) |
+| `goal_requirements` | type, critical, weight, target/current value, unit, deadline, official source + checked date, verification and satisfaction status, override reason |
+| `milestones` | goal, optional requirement, phase, due date, status, acceptance criteria, weight |
+| `tasks` (+columns) | `milestone_id`, `estimated_effort_minutes`, `actual_effort_minutes` |
+| `task_requirement_links` | task ↔ requirement with `allocation_pct` (per task total ≤ 100%) and rationale |
+| `task_dependencies` | task depends on task; cycles rejected in the service |
+| `skills`, `goal_skills`, `task_skill_links` | skills with a 6-level rubric and `rubric_version`; required level per goal; practised skills per task |
+| `skill_evidence` | type, level (nullable), score/max, rubric version at the time, task/requirement/page/URL provenance, observed date, reviewer |
+| `focus_sessions` | started/ended, minutes, quality, energy, note; an unfinished row is the running timer |
+| `habits`, `habit_logs` | schedule JSON; one log per (habit, date) with done/missed/skipped |
+| `financial_accounts`, `financial_categories`, `transactions` | integer minor units; transfers are a signed pair sharing `transfer_group_id` |
+| `budgets`, `savings_goals`, `savings_allocations` | monthly limit per category+currency; allocations earmark existing cash |
+| `reviews` | weekly summary snapshot + reflection, learnings, next commitments |
+| `drafts` | pending AI proposals (goal breakdowns) |
+| `audit_events` | finance create/update/delete/restore/allocate history |
+
+Migration v1 → v2 only adds tables/columns. Existing pages and tasks are kept as they are; no goals, skills or evidence are inferred (tested in `tests/growth.rs`).
+
 ## Value formats
 
 | Property type | Stored JSON |

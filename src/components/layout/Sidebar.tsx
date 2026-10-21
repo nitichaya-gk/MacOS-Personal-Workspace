@@ -238,6 +238,12 @@ export function Sidebar() {
         {navItem(t("Search"), "search", s.route.name === "search", () => s.setPaletteOpen(true))}
         {navItem(t("Home"), "home", s.route.name === "home", () => s.navigate({ name: "home" }), s.counts?.today)}
         {navItem(t("Tasks"), "task", s.route.name === "tasks", () => s.navigate({ name: "tasks" }), s.counts?.overdue, true)}
+        <div className="section-head"><span className="label">{t("Growth")}</span></div>
+        {navItem(t("Goals"), "star", s.route.name === "goals" || s.route.name === "goal", () => s.navigate({ name: "goals" }))}
+        {navItem(t("Learning & skills"), "template", s.route.name === "skills", () => s.navigate({ name: "skills" }))}
+        {navItem(t("Habits"), "restore", s.route.name === "habits", () => s.navigate({ name: "habits" }))}
+        {navItem(t("Finance"), "database", s.route.name === "finance", () => s.navigate({ name: "finance" }))}
+        {navItem(t("Weekly review"), "calendar", s.route.name === "review", () => s.navigate({ name: "review" }))}
 
         {favorites.length > 0 && (
           <>

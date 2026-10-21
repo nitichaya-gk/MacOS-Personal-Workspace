@@ -6,6 +6,7 @@ import type { PageMeta, Task } from "../../shared/types";
 import { relativeTime } from "../../shared/utils";
 import { kindIcon } from "../../components/ui/Icon";
 import { TaskRow } from "./TaskRow";
+import { TodayGrowth } from "../goals/TodayGrowth";
 
 function greeting(t: (s: string) => string) {
   const h = new Date().getHours();
@@ -56,6 +57,8 @@ export function HomeView() {
         {overdue.map((x) => <TaskRow key={x.id} task={x} onChanged={() => (load(), s.refreshCounts())} />)}
         {today.map((x) => <TaskRow key={x.id} task={x} onChanged={() => (load(), s.refreshCounts())} />)}
         {!today.length && !overdue.length && <div className="muted" style={{ padding: "8px 0" }}>🌤️ {t("Nothing due today.")}</div>}
+
+        <TodayGrowth />
 
         <div className="h-section">{t("Recently visited")}</div>
         {recent.length ? (

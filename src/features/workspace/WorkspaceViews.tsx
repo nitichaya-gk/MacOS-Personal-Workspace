@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useStore } from "../../app/providers/store";
 import { useI18n } from "../../app/providers/i18n";
 import { api } from "../../services/desktop-bridge/api";
+import { growth } from "../../services/desktop-bridge/growthApi";
 import type { PageMeta, Task } from "../../shared/types";
 import { relativeTime } from "../../shared/utils";
 import { kindIcon } from "../../components/ui/Icon";
@@ -11,7 +12,11 @@ export function TrashView() {
   const s = useStore();
   const { t, locale } = useI18n();
   const [data, setData] = useState<{ pages: PageMeta[]; tasks: Task[] } | null>(null);
-  const load = () => api.pages.trash().then(setData).catch(s.fail);
+  const [goalsTrash, setGoalsTrash] = useState<{ id: string; title: string; deletedAt: string }[]>([]);
+  const load = () => {
+    api.pages.trash().then(setData).catch(s.fail);
+    growth.goals.trash().then(setGoalsTrash).catch(() => {});
+  };
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -23,7 +28,7 @@ export function TrashView() {
       run().then(after).catch(s.fail);
   };
 
-  const empty = !data || (!data.pages.length && !data.tasks.length);
+  const empty = !data || (!data.pages.length && !data.tasks.length && !goalsTrash.length);
   return (
     <div className="content">
       <div className="page">
@@ -49,6 +54,15 @@ export function TrashView() {
                 <span className="small-text faint">{p.deletedAt && relativeTime(p.deletedAt, locale)}</span>
                 <button className="btn small" onClick={() => api.pages.restore(p.id).then(after).catch(s.fail)}>{t("Restore")}</button>
                 <button className="btn small danger" onClick={() => forever(p.title, () => api.pages.deleteForever(p.id))}>{t("Delete forever")}</button>
+              </div>
+            ))}
+            {goalsTrash.map((g) => (
+              <div key={g.id} className="list-row">
+                <span>🎯</span>
+                <span className="t">{g.title}</span>
+                <span className="small-text faint">{relativeTime(g.deletedAt, locale)}</span>
+                <button className="btn small" onClick={() => growth.goals.restore(g.id).then(after).catch(s.fail)}>{t("Restore")}</button>
+                <button className="btn small danger" onClick={() => forever(g.title, () => growth.goals.deleteForever(g.id))}>{t("Delete forever")}</button>
               </div>
             ))}
             {data!.tasks.map((x) => (

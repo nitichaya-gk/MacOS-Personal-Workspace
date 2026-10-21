@@ -16,6 +16,12 @@ const routeTitles: Record<string, string> = {
   archive: "Archive",
   templates: "Templates",
   settings: "Settings",
+  goals: "Goals & Roadmaps",
+  goal: "Goal",
+  skills: "Learning & skills",
+  habits: "Habits & routines",
+  finance: "Personal finance",
+  review: "Weekly review",
 };
 
 export function TopBar() {

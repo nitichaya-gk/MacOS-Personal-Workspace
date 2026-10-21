@@ -96,8 +96,9 @@ export const api = {
     list: (view: string, opts: { projectId?: string | null; pageId?: string | null; limit?: number } = {}) => rpc<Task[]>("tasks.list", { view, ...opts }),
     counts: () => rpc<TaskCounts>("tasks.counts"),
     get: (id: string) => rpc<Task>("tasks.get", { id }),
-    create: (task: Partial<Omit<Task, "links">> & { title: string; links?: string[] }) => rpc<Task>("tasks.create", { task }),
-    update: (id: string, patch: Partial<Omit<Task, "links">> & { links?: string[] }) => rpc<Task>("tasks.update", { id, patch }),
+    // Patch fields mirror Task, with link lists given as ids / {requirementId, allocationPct}.
+    create: (task: Record<string, unknown> & { title: string }) => rpc<Task>("tasks.create", { task }),
+    update: (id: string, patch: Record<string, unknown>) => rpc<Task>("tasks.update", { id, patch }),
     remove: (id: string) => rpc("tasks.delete", { id }),
     restore: (id: string) => rpc<Task>("tasks.restore", { id }),
     deleteForever: (id: string) => rpc("tasks.deleteForever", { id }),
